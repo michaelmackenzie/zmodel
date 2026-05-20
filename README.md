@@ -35,24 +35,37 @@ pyenv rootana 2.5.0
 
 ## Usage
 
+User-facing tool scripts are organized under `scripts/`:
+
+- `scripts/zmodel` for build/load/analyze
+- `scripts/plot_analysis.py` for plotting from snapshots
+
+Compatibility wrappers remain at the repository root (`./zmodel` and `./plot_analysis.py`).
+
 Build a model bundle from a text card. The default output is `model.pkl`, and observed data from the card is bundled when present:
 
 ```bash
-./zmodel build examples/simple_model_card_example.txt
+./scripts/zmodel build examples/simple_model_card_example.txt
 ```
 
 Load a saved model bundle. The summary includes the observed data count when it exists:
 
 ```bash
-./zmodel load model.pkl
+./scripts/zmodel load model.pkl
 ```
 
 Run an analysis. If the saved model contains observed data, `analyze` fits that data by default. Use `--toys N` to generate toy datasets, or `--toys -1` to run the exact binned Asimov mode for validation:
 
 ```bash
-./zmodel analyze --model-file model.pkl
-./zmodel analyze --model-file model.pkl --toys 10 --fit-mode auto
-./zmodel analyze --model-file model.pkl --toys -1
+./scripts/zmodel analyze --model-file model.pkl
+./scripts/zmodel analyze --model-file model.pkl --toys 10 --fit-mode auto
+./scripts/zmodel analyze --model-file model.pkl --toys -1
+```
+
+Generate plots from a saved analysis snapshot:
+
+```bash
+./scripts/plot_analysis.py analysis_output.pkl --plot-dir plots_from_snapshot
 ```
 
 ## Notes

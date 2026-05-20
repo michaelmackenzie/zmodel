@@ -1,8 +1,14 @@
 #!/usr/bin/env python3
 import argparse
 import os
-
+import sys
 import dill
+
+# Allow importing project modules when running from python/.
+import pathlib
+REPO_ROOT = pathlib.Path(__file__).resolve().parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from analyze_plotting import plot_summary_artifacts
 

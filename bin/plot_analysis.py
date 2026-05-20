@@ -2,7 +2,6 @@
 import pathlib
 import runpy
 
-
 if __name__ == "__main__":
-    script_path = pathlib.Path(__file__).resolve().parent / "scripts" / "zmodel"
+    script_path = pathlib.Path(__file__).resolve().parent.parent / "python" / "plot_analysis.py"
     runpy.run_path(str(script_path), run_name="__main__")
