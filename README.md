@@ -67,7 +67,7 @@ Run an analysis. If the saved model contains observed data, `analyze` fits that 
 Generate plots from a saved analysis snapshot:
 
 ```bash
-./scripts/plot_analysis.py analysis_output.pkl --plot-dir plots_from_snapshot
+./bin/plot_analysis.py analysis_output.pkl --plot-dir plots_from_snapshot
 ```
 
 ## Notes
