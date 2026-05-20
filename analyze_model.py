@@ -226,6 +226,11 @@ def _build_counting_binned_space(fit_model):
     return zfit.Space(obs_name, binning=binning)
 
 
+def _binning_edges_as_float_array(binning):
+    edges = getattr(binning, "edges", binning)
+    return np.asarray(list(edges), dtype=float)
+
+
 def _build_binned_space(fit_model, bins):
     if _is_likely_counting_model(fit_model):
         return _build_counting_binned_space(fit_model)
@@ -243,7 +248,7 @@ def _build_binned_space(fit_model, bins):
 def _make_binned_toy_data(model, binned_space):
     sample = model.sample(n="auto")
     values = np.asarray(sample.value(), dtype=float).reshape(-1)
-    edges = np.asarray(binned_space.binning.edges, dtype=float)
+    edges = _binning_edges_as_float_array(binned_space.binning)
     counts, _ = np.histogram(values, bins=edges)
     data = zfit.data.BinnedData.from_tensor(space=binned_space, values=counts.astype(float))
     return data, values, edges, counts.astype(float)
@@ -294,6 +299,8 @@ def _plot_dataset_and_components(summary, fit_model, plot_dir, binned_bins):
     toy_plot = summary.get("toy_plot")
     if not toy_plot:
         return
+    is_observed = bool(summary.get("observed_fit") or toy_plot.get("observed"))
+    is_asimov = bool(summary.get("asimov_fit") or toy_plot.get("asimov"))
 
     os.makedirs(plot_dir, exist_ok=True)
     baseline_values = _capture_parameter_values(fit_model.model)
@@ -305,13 +312,21 @@ def _plot_dataset_and_components(summary, fit_model, plot_dir, binned_bins):
         mode = toy_plot.get("mode")
         signal_category = _find_total_signal_category(fit_model)
 
+        # Label for data points
+        if is_asimov:
+            data_label = "Asimov data"
+        elif is_observed:
+            data_label = "Observed data"
+        else:
+            data_label = "Toy data"
+
         if mode == "binned":
             edges = np.asarray(toy_plot["edges"], dtype=float)
             counts = np.asarray(toy_plot["counts"], dtype=float)
             centers = 0.5 * (edges[:-1] + edges[1:])
             yerr = np.sqrt(np.maximum(counts, 1.0))
 
-            ax.errorbar(centers, counts, yerr=yerr, fmt="o", color="black", markersize=4, capsize=2, label="Toy data")
+            ax.errorbar(centers, counts, yerr=yerr, fmt="o", color="black", markersize=4, capsize=2, label=data_label)
 
             total_counts = _binned_model_counts_from_pdf(
                 fit_model.model,
@@ -340,14 +355,14 @@ def _plot_dataset_and_components(summary, fit_model, plot_dir, binned_bins):
             ax.set_ylabel("Entries / bin")
 
         else:
-            values = np.asarray(toy_plot["values"], dtype=float)
+            values = np.asarray(toy_plot.get("values", []), dtype=float)
             lower, upper = fit_model.obs_range
             bins = np.linspace(float(lower), float(upper), int(binned_bins) + 1)
-            counts, edges = np.histogram(values, bins=bins)
+            counts, edges = np.histogram(values, bins=bins) if values.size > 0 else (np.zeros(int(binned_bins)), np.linspace(float(lower), float(upper), int(binned_bins) + 1))
             centers = 0.5 * (edges[:-1] + edges[1:])
             yerr = np.sqrt(np.maximum(counts, 1.0))
 
-            ax.errorbar(centers, counts, yerr=yerr, fmt="o", color="black", markersize=4, capsize=2, label="Toy data")
+            ax.errorbar(centers, counts, yerr=yerr, fmt="o", color="black", markersize=4, capsize=2, label=data_label)
 
             x_plot = np.linspace(float(lower), float(upper), 1000)
             total_curve = np.asarray(fit_model.model.pdf(x_plot), dtype=float).reshape(-1)
@@ -374,7 +389,13 @@ def _plot_dataset_and_components(summary, fit_model, plot_dir, binned_bins):
             ax.set_xlabel(fit_model.obs.obs[0] if getattr(fit_model.obs, "obs", None) else "obs")
             ax.set_ylabel("Entries / bin")
 
-        ax.set_title(f"Toy {summary['toy']} Dataset and Fit Components")
+        if is_asimov:
+            title = "Asimov Data and Fit Components"
+        elif is_observed:
+            title = "Observed Data and Fit Components"
+        else:
+            title = f"Toy {summary['toy']} Dataset and Fit Components"
+        ax.set_title(title)
         ax.legend()
         ax.grid(alpha=0.25)
         fig.tight_layout()
@@ -464,6 +485,19 @@ def _build_toy_data(fit_model, resolved_fit_mode, binned_space, is_counting):
         "values": values,
     }
     return data, None, toy_plot
+
+
+def _build_asimov_binned_data(binned_model, binned_space):
+    data = binned_model.to_binneddata()
+    expected_counts = np.asarray(binned_model.values(), dtype=float).reshape(-1)
+    edges = _binning_edges_as_float_array(binned_space.binning)
+    toy_plot = {
+        "mode": "binned",
+        "edges": edges,
+        "counts": expected_counts,
+        "asimov": True,
+    }
+    return data, expected_counts, toy_plot
 
 
 def _build_loss(fit_model, resolved_fit_mode, binned_model, data):
@@ -910,6 +944,8 @@ def _plot_summary_artifacts(summaries, fit_model, plot_dir, binned_bins):
 def run_analysis(
     fit_model,
     toys,
+    use_observed_data=False,
+    use_asimov_data=False,
     cls_alpha=None,
     signal_strength=None,
     scan_max=None,
@@ -947,18 +983,64 @@ def run_analysis(
         binned_space = _build_binned_space(fit_model, binned_bins)
         binned_model = fit_model.model.to_binned(binned_space)
 
+    if use_asimov_data and resolved_fit_mode != "binned":
+        raise ValueError("--toys -1 is only supported for binned fits")
+
     for toy_index in range(toys):
         toy_start = time.perf_counter()
         _restore_parameter_values(starting_values)
         if signal_strength is not None and signal_param is not None and hasattr(signal_param, "set_value"):
             signal_param.set_value(signal_strength)
 
-        data, toy_count, toy_plot = _build_toy_data(
-            fit_model=fit_model,
-            resolved_fit_mode=resolved_fit_mode,
-            binned_space=binned_space,
-            is_counting=is_counting,
-        )
+        if use_observed_data:
+            if resolved_fit_mode == "binned":
+                edges = _binning_edges_as_float_array(binned_space.binning)
+                if hasattr(fit_model.data, "value"):
+                    observed_values = np.asarray(fit_model.data.value(), dtype=float).reshape(-1)
+                    counts, _ = np.histogram(observed_values, bins=edges)
+                    if hasattr(fit_model.data, "to_binned"):
+                        data = fit_model.data.to_binned(binned_space)
+                    else:
+                        data = zfit.data.BinnedData.from_tensor(
+                            space=binned_space,
+                            values=counts.astype(float),
+                        )
+                else:
+                    observed_count = float(fit_model.data)
+                    observed_values = np.array([observed_count], dtype=float)
+                    counts = np.array([observed_count], dtype=float)
+                    data = zfit.data.BinnedData.from_tensor(
+                        space=binned_space,
+                        values=counts,
+                    )
+                toy_plot = {
+                    "mode": "binned",
+                    "edges": edges,
+                    "counts": counts.astype(float),
+                    "values": observed_values,
+                    "observed": True,
+                }
+            else:
+                data = fit_model.data
+                if hasattr(data, "value"):
+                    observed_values = np.asarray(data.value(), dtype=float).reshape(-1)
+                else:
+                    observed_values = np.array([float(data)], dtype=float)
+                toy_plot = {
+                    "mode": "unbinned",
+                    "values": observed_values,
+                    "observed": True,
+                }
+            toy_count = None
+        elif use_asimov_data:
+            data, toy_count, toy_plot = _build_asimov_binned_data(binned_model, binned_space)
+        else:
+            data, toy_count, toy_plot = _build_toy_data(
+                fit_model=fit_model,
+                resolved_fit_mode=resolved_fit_mode,
+                binned_space=binned_space,
+                is_counting=is_counting,
+            )
         loss = _build_loss(
             fit_model=fit_model,
             resolved_fit_mode=resolved_fit_mode,
@@ -1006,6 +1088,8 @@ def run_analysis(
             summary["count"] = toy_count
         summary["toy_time_s"] = time.perf_counter() - toy_start
         summary["toy_plot"] = toy_plot
+        summary["observed_fit"] = bool(use_observed_data)
+        summary["asimov_fit"] = bool(use_asimov_data)
 
         poi_true = signal_strength if signal_strength is not None else starting_values.get(poi_param)
         poi_unc = summary.get("poi_unc_hesse")
@@ -1040,15 +1124,21 @@ def run_analysis(
     return summaries
 
 
-def _print_toy_summary(summary):
+def _print_toy_summary(summary, is_observed_fit=False):
     poi_label = summary.get("poi_name", "poi")
     poi_fit = summary.get("poi_fit")
     poi_unc = summary.get("poi_unc_hesse")
     fit_text = f"{poi_fit:.3g}" if poi_fit is not None else "n/a"
     unc_text = f"{poi_unc:.3g}" if poi_unc is not None else "n/a"
     status_text = "valid" if summary['valid'] else "invalid"
+    if summary.get("asimov_fit") or summary.get("toy_plot", {}).get("asimov"):
+        label = "Asimov data"
+    elif is_observed_fit or summary.get("observed_fit") or summary.get("toy_plot", {}).get("observed"):
+        label = "Observed data"
+    else:
+        label = f"Toy {summary['toy']:3d}"
     print(
-        f"Toy {summary['toy']:3d}: {status_text:<7}, "
+        f"{label}: {status_text:<7}, "
         f"{poi_label}={fit_text:<10} +- {unc_text:<10}, "
         f"time={summary.get('toy_time_s', float('nan')):.4f}s"
     )
@@ -1104,6 +1194,7 @@ def _save_analysis_snapshot(output_pkl, fit_model, summaries, args):
     return output_path
 
 
+
 def run_analysis_cli(args):
     fit_model = _load_analysis_model(model_file=args.model_file, input_card=args.input_card)
     _apply_parameter_overrides(
@@ -1112,11 +1203,30 @@ def run_analysis_cli(args):
         set_ranges_spec=args.set_parameter_ranges,
         freeze_spec=args.freeze_parameters,
     )
-    _configure_runtime(args.graph_mode, fit_model, args.toys)
+
+    has_observed_data = hasattr(fit_model, "data") and fit_model.data is not None
+    if args.toys is None:
+        use_observed_data = has_observed_data
+        use_asimov_data = False
+        n_toys = 1
+    elif args.toys == -1:
+        use_observed_data = False
+        use_asimov_data = True
+        n_toys = 1
+    elif args.toys < -1:
+        raise ValueError("Only --toys -1 is supported as a special Asimov mode")
+    else:
+        use_observed_data = False
+        use_asimov_data = False
+        n_toys = int(args.toys)
+
+    _configure_runtime(args.graph_mode, fit_model, n_toys)
     total_start = time.perf_counter()
     summaries = run_analysis(
         fit_model,
-        toys=args.toys,
+        toys=n_toys,
+        use_observed_data=use_observed_data,
+        use_asimov_data=use_asimov_data,
         cls_alpha=args.cls,
         signal_strength=args.signal_strength,
         scan_max=args.scan_max,

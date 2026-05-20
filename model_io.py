@@ -1,6 +1,7 @@
 import __main__
 import json
 import os
+import pickle
 from dataclasses import asdict
 from typing import Any, Dict, Optional
 
@@ -72,8 +73,14 @@ def save_fit_model_bundle(fit_model: FitModel, output_file: str, card=None, card
     if card is not None:
         bundle["card"] = _serialize_card(card, card_dir)
 
-    with open(output_file, "w", encoding="utf-8") as handle:
-        json.dump(bundle, handle, indent=2)
+    ext = os.path.splitext(output_file)[1].lower()
+    if ext == ".json":
+        with open(output_file, "w", encoding="utf-8") as handle:
+            json.dump(bundle, handle, indent=2)
+        return
+
+    with open(output_file, "wb") as handle:
+        pickle.dump(bundle, handle)
 
 
 def _choose_top_model(distributions: Dict[str, Any]):
@@ -124,8 +131,13 @@ def _fit_model_from_hs3_payload(hs3_payload: Dict[str, Any], fit_metadata: Optio
 
 
 def load_fit_model(model_file: str) -> FitModel:
-    with open(model_file, "r", encoding="utf-8") as handle:
-        payload = json.load(handle)
+    payload = None
+    with open(model_file, "rb") as handle:
+        try:
+            payload = pickle.load(handle)
+        except Exception:
+            handle.seek(0)
+            payload = json.load(handle)
 
     if payload.get("format") == "fit_model_bundle_v1":
         card_payload = payload.get("card")

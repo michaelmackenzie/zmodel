@@ -4,9 +4,14 @@ import argparse
 
 def _add_analyze_arguments(parser):
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--model-file", help="Path to a saved model JSON file")
+    source.add_argument("--model-file", help="Path to a saved model file (default format: .pkl)")
     source.add_argument("--input-card", help="Path to a text model card")
-    parser.add_argument("--toys", type=int, default=1, help="Number of toy datasets to generate and fit")
+    parser.add_argument(
+        "--toys",
+        type=int,
+        default=None,
+        help="Number of toy datasets to generate and fit (default: use observed data if available, otherwise 1; use -1 for binned Asimov data)",
+    )
     parser.add_argument("--cls", type=float, default=None, help="If set, compute the CLs upper limit for this alpha value")
     parser.add_argument("--signal-strength", type=float, default=None, help="Override the signal strength before generating toys")
     parser.add_argument("--scan-max", type=float, default=None, help="Override the maximum signal scan value for CLs")
@@ -104,10 +109,15 @@ def build_parser():
 
     build_parser = subparsers.add_parser("build", help="Build and save a zfit model from a text card")
     build_parser.add_argument("input_card", help="Path to the model-card text file")
-    build_parser.add_argument("output_file", help="Path to the output model JSON file")
+    build_parser.add_argument(
+        "output_file",
+        nargs="?",
+        default="model.pkl",
+        help="Path to the output model file (default: model.pkl)",
+    )
 
     load_parser = subparsers.add_parser("load", help="Load and summarize a saved model bundle")
-    load_parser.add_argument("model_file", help="Path to the saved model JSON file")
+    load_parser.add_argument("model_file", help="Path to the saved model file")
 
     analyze_parser = subparsers.add_parser("analyze", help="Run toy fits and optional CLs limits")
     _add_analyze_arguments(analyze_parser)
@@ -137,6 +147,8 @@ def main():
         print(f"Signal process: {summary['signal_process']}")
         print(f"Constraints: {summary['constraints']}")
         print(f"Floating params: {summary['floating_params']}")
+        if summary.get('observed_count') is not None:
+            print(f"Observed data count: {summary['observed_count']}")
         return
 
     if args.command == "analyze":

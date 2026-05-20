@@ -573,6 +573,11 @@ def build_and_save_model_from_card_file(input_card: str, output_file: str) -> st
     card = parse_model_card(card_path)
     fit_model = build_model_from_card(card, card_dir)
 
+    # Always include observed data in the bundle if present
+    # For counting models, this is just the observation_count
+    if card.is_counting and card.observation_count is not None:
+        fit_model.data = card.observation_count
+
     output_path = os.path.abspath(output_file)
     save_fit_model_bundle(fit_model, output_path, card=card, card_dir=card_dir)
     return output_path
