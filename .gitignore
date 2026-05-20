@@ -1,0 +1,30 @@
+# temporary or local files
+*~
+*pycache*
+#*
+.#*
+*\#
+*.log
+*.out
+*.tmp
+*.save
+*.diff
+*.swap
+# ignore images
+*.png
+*.jpg
+*.svg
+*.pdf
+*.gif
+*.pyc
+*.so
+*.d
+*.pcm
+*.zip
+# ignore data files
+*.root
+*.hist
+*.tree
+*.pkl
+*.json
+*.txt
