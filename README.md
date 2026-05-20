@@ -19,6 +19,8 @@ Clone the repository and install dependencies in your own Python environment:
 ```bash
 git clone https://github.com/michaelmackenzie/zfit_modeling.git zfit_modeling
 cd zfit_modeling
+PATH="${PATH}:${PWD}/bin"
+PYTHONPATH="${PYTHONPATH}:${PWD}/python"
 
 # For general users
 python -m venv .venv
@@ -45,21 +47,21 @@ Compatibility wrappers remain at the repository root (`./zmodel` and `./plot_ana
 Build a model bundle from a text card. The default output is `model.pkl`, and observed data from the card is bundled when present:
 
 ```bash
-./scripts/zmodel build examples/simple_model_card_example.txt
+./bin/zmodel build examples/simple_model_card_example.txt
 ```
 
 Load a saved model bundle. The summary includes the observed data count when it exists:
 
 ```bash
-./scripts/zmodel load model.pkl
+./bin/zmodel load model.pkl
 ```
 
 Run an analysis. If the saved model contains observed data, `analyze` fits that data by default. Use `--toys N` to generate toy datasets, or `--toys -1` to run the exact binned Asimov mode for validation:
 
 ```bash
-./scripts/zmodel analyze --model-file model.pkl
-./scripts/zmodel analyze --model-file model.pkl --toys 10 --fit-mode auto
-./scripts/zmodel analyze --model-file model.pkl --toys -1
+./bin/zmodel analyze --model-file model.pkl
+./bin/zmodel analyze --model-file model.pkl --toys 10 --fit-mode auto --plot
+./bin/zmodel analyze --model-file model.pkl --toys -1
 ```
 
 Generate plots from a saved analysis snapshot:
