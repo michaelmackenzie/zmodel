@@ -13,6 +13,7 @@ def _add_analyze_arguments(parser):
         help="Number of toy datasets to generate and fit (default: use observed data if available, otherwise 1; use -1 for binned Asimov data)",
     )
     parser.add_argument("--cls", type=float, default=None, help="If set, compute the CLs upper limit for this alpha value")
+    parser.add_argument("--seed", type=int, default=1234, help="Set the zfit seed")
     parser.add_argument("--signal-strength", type=float, default=None, help="Override the signal strength before generating toys")
     parser.add_argument("--scan-max", type=float, default=None, help="Override the maximum signal scan value for CLs")
     parser.add_argument(
@@ -98,7 +99,7 @@ def _add_analyze_arguments(parser):
     parser.add_argument(
         "--output-pkl",
         type=str,
-        default="analysis_output.pkl",
+        default=None,
         help="Output pickle file containing the fitted model, input data, and toy summaries",
     )
 
