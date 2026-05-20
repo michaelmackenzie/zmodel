@@ -1,4 +1,3 @@
-import argparse
 import dill
 import os
 import time
@@ -1105,103 +1104,7 @@ def _save_analysis_snapshot(output_pkl, fit_model, summaries, args):
     return output_path
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Run toy fits and optional CLs limits from a saved model or a text card")
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--model-file", help="Path to a saved model JSON file")
-    source.add_argument("--input-card", help="Path to a text model card")
-    parser.add_argument("--toys", type=int, default=1, help="Number of toy datasets to generate and fit")
-    parser.add_argument("--cls", type=float, default=None, help="If set, compute the CLs upper limit for this alpha value")
-    parser.add_argument("--signal-strength", type=float, default=None, help="Override the signal strength before generating toys")
-    parser.add_argument("--scan-max", type=float, default=None, help="Override the maximum signal scan value for CLs")
-    parser.add_argument(
-        "--cls-scan-points",
-        type=int,
-        default=None,
-        help="Number of scan points for CLs (default: 9 for counting+binned, else 25)",
-    )
-    parser.add_argument(
-        "--fit-mode",
-        choices=("auto", "binned", "unbinned"),
-        default="auto",
-        help="Likelihood type: auto (default), binned, or unbinned",
-    )
-    parser.add_argument(
-        "--binned-bins",
-        type=int,
-        default=40,
-        help="Number of bins for non-counting binned fits",
-    )
-    parser.add_argument(
-        "--graph-mode",
-        choices=("auto", "on", "off"),
-        default="on",
-        help="TensorFlow graph mode: on (default), auto, or off",
-    )
-    parser.add_argument(
-        "--profile-scan",
-        action="store_true",
-        help="For counting+binned fits, run a profile-likelihood scan over the POI instead of full minimization",
-    )
-    parser.add_argument(
-        "--poi-name",
-        default=None,
-        help="Optional parameter name to treat as parameter of interest (POI) for --profile-scan",
-    )
-    parser.add_argument(
-        "--promote-poi",
-        action="store_true",
-        help="If --poi-name points to a fixed parameter, set it floating so it can be used as POI",
-    )
-    parser.add_argument(
-        "--poi-scan-points",
-        type=int,
-        default=41,
-        help="Number of scan points for --profile-scan",
-    )
-    parser.add_argument(
-        "--poi-scan-max",
-        type=float,
-        default=None,
-        help="Optional upper edge for POI scan (lower edge uses POI lower bound/default)",
-    )
-    parser.add_argument(
-        "--plot",
-        action="store_true",
-        help="Save histogram plots of fit parameters, POI pull, and per-toy fit distributions",
-    )
-    parser.add_argument(
-        "--plot-dir",
-        type=str,
-        default="plots",
-        help="Output directory for --plot artifacts",
-    )
-    parser.add_argument(
-        "--set-parameters",
-        type=str,
-        default=None,
-        help="Optional parameter settings to override the input model, e.g. 'param1=1.5,param2=2.0'",
-    )
-    parser.add_argument(
-        "--freeze-parameters",
-        type=str,
-        default=None,
-        help="Optional parameter list to freeze in the model, e.g. 'param1,param2'",
-    )
-    parser.add_argument(
-        "--set-parameter-ranges",
-        type=str,
-        default=None,
-        help="Optional parameter ranges to override the input model, e.g. 'param1=0.5:2.0,param2=1.0:3.0'",
-    )
-    parser.add_argument(
-        "--output-pkl",
-        type=str,
-        default="analysis_output.pkl",
-        help="Output pickle file containing the fitted model, input data, and toy summaries",
-    )
-    args = parser.parse_args()
-
+def run_analysis_cli(args):
     fit_model = _load_analysis_model(model_file=args.model_file, input_card=args.input_card)
     _apply_parameter_overrides(
         fit_model,
@@ -1251,7 +1154,3 @@ def main():
         args=args,
     )
     print(f"Saved analysis snapshot to: {snapshot_path}")
-
-
-if __name__ == "__main__":
-    main()

@@ -10,16 +10,6 @@ from hepstats.hypotests.calculators import AsymptoticCalculator
 from hepstats.hypotests.parameters import POI
 from hepstats.hypotests.parameters import POIarray
 
-# Histogram and selection information
-selection_set    = 20
-hist_path        = '/exp/mu2e/data/users/mmackenz/conv_ana/histograms/'
-hist_mode        = 2
-path_in_file     = f'Ana/ConvAna_ConvAna/Hist/trk_{selection_set}'
-tree_in_file     = f'Ana/ConvAna_ConvAna/data/Norm'
-hist_name        = 'obs'
-target_bin_width = 0.5
-
-
 @dataclass
 class FitModel:
     obs: zfit.Space
@@ -57,16 +47,48 @@ class PowerLaw(zfit.pdf.ZPDF):
 # ==============================================================================
 # Helper Function: Convert a ROOT Histogram to zfit-compatible BinnedData
 # ==============================================================================
-def load_binned_data_from_root(name, obs_space, scale = 1., nexpected = -1):
-    file_path = f'{hist_path}ConvAna.cnv_ana.{name}.m{hist_mode}.hist'
+def load_binned_data_from_root(
+    name,
+    obs_space,
+    file_path,
+    *,
+    histogram_path,
+    target_bin_width,
+    scale=1.0,
+    nexpected=-1,
+    tree_path=None,
+):
+    """Load binned data from a ROOT histogram using explicit, portable inputs.
+
+    Parameters
+    ----------
+    name : str
+        Dataset/process name used only for logging and errors.
+    obs_space : zfit.Space
+        Observable space defining the target range.
+    file_path : str
+        ROOT input file path.
+    histogram_path : str
+        Path to histogram within the ROOT file, e.g. "dir/hist".
+    target_bin_width : float
+        Desired output bin width in axis units.
+    scale : float, optional
+        Global scale factor applied to histogram counts.
+    nexpected : int or float, optional
+        If > 0, normalize sampled histogram counts to this expected count.
+    tree_path : str, optional
+        ROOT tree path used when `nexpected > 0` to read branch "nseen".
+    """
     with uproot.open(file_path) as f:
         # Access the histogram inside the target directory
-        raw_hist = f[f"{path_in_file}/{hist_name}"]
+        raw_hist = f[histogram_path]
         if not raw_hist:
             raise Exception(f"No histogram for {name}")
         h = raw_hist.to_hist()
         if nexpected > 0:
-            tree = f[tree_in_file]
+            if tree_path is None:
+                raise ValueError("tree_path is required when nexpected > 0")
+            tree = f[tree_path]
             nseen = np.sum(tree["nseen"].array())
             if nseen != nexpected:
                 print(f'{name} has {nseen} sampled count, but expected {nexpected} --> Scaling to compensate!')

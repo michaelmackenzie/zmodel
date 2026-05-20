@@ -1,4 +1,3 @@
-import argparse
 import os
 import pickle
 from dataclasses import dataclass
@@ -567,22 +566,13 @@ def build_model_from_card(card: CardSpec, card_dir: str):
     )
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Build and save a zfit model from a text model card")
-    parser.add_argument("input_card", help="Path to the model-card text file")
-    parser.add_argument("output_file", help="Path to the output HS3 JSON file")
-    args = parser.parse_args()
-
-    card_path = os.path.abspath(args.input_card)
+def build_and_save_model_from_card_file(input_card: str, output_file: str) -> str:
+    card_path = os.path.abspath(input_card)
     card_dir = os.path.dirname(card_path)
 
     card = parse_model_card(card_path)
     fit_model = build_model_from_card(card, card_dir)
 
-    output_path = os.path.abspath(args.output_file)
+    output_path = os.path.abspath(output_file)
     save_fit_model_bundle(fit_model, output_path, card=card, card_dir=card_dir)
-    print(f"Saved FitModel to {output_path}")
-
-
-if __name__ == "__main__":
-    main()
+    return output_path

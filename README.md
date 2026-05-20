@@ -14,20 +14,38 @@ These inputs are combined into a total model workspace that is used for analysis
 
 ## Installation
 
+Clone the repository and install dependencies in your own Python environment:
+
 ```bash
-git clone https://github.com/michaelmackenzie/zfit_modeling.git
+git clone <your-fork-or-repo-url>
+cd zfit_modeling
+python -m venv .venv
+source .venv/bin/activate
+pip install zfit uproot hist hepstats dill scipy tensorflow
 ```
 
 ## Usage
 
-In the Mu2e environment, the underlying python environment must first be enabled:
+Build a model bundle from a text card:
+
 ```bash
-source /cvmfs/mu2e.opensciencegrid.org/setupmu2e-art.sh
-pyenv rootana 2.5.0
+./zmodel build examples/simple_model_card_example.txt model.json
 ```
 
-Converting input model information into a complete model workspace:
+Load a saved model bundle:
+
 ```bash
-
-
+./zmodel load model.json
 ```
+
+Run toy fits and optional CLs evaluation:
+
+```bash
+./zmodel analyze --model-file model.json --toys 10 --fit-mode auto
+```
+
+## Notes
+
+- No user-specific file locations are required by default.
+- Input cards should use relative paths (recommended) or absolute paths to your own data files.
+- ROOT histogram loading utilities require explicit file and object paths; no hidden global path configuration is used.
