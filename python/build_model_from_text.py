@@ -554,7 +554,7 @@ def build_model_from_card(card: CardSpec, card_dir: str):
         all_factors = list(rate_factors[process])
 
         if process in signal_processes:
-            mu = zfit.Parameter(f"mu_{process}", 1.0, 0.0, 10.0)
+            mu = zfit.Parameter(f"mu_{process}", 1.0, 0.0, 100.0)
             all_factors.insert(0, mu)
 
         yields[process] = multiply_factors(

@@ -245,3 +245,44 @@ def plot_summary_artifacts(summaries, fit_model, plot_dir, binned_bins):
 
     for summary in summaries:
         plot_dataset_and_components(summary, fit_model, plot_dir, binned_bins)
+
+    for summary in summaries:
+        if "nll_scan" in summary:
+            plot_nll_scan(summary, plot_dir)
+            break  # only first toy that has a scan
+
+
+def plot_nll_scan(summary, plot_dir):
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    scan = summary["nll_scan"]
+    poi_values = np.asarray(scan["poi_values"], dtype=float)
+    delta_nll = np.asarray(scan["delta_nll_values"], dtype=float)
+    poi_name = scan["poi_name"]
+
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(poi_values, delta_nll, color="tab:blue", linewidth=1.8)
+    ax.axhline(0.5, color="tab:orange", linestyle="--", linewidth=1.2, label=r"1$\sigma$ ($\Delta$NLL = 0.5)")
+    ax.axhline(2.0, color="tab:red", linestyle=":", linewidth=1.2, label=r"2$\sigma$ ($\Delta$NLL = 2.0)")
+
+    # Mark best-fit value
+    best_idx = int(np.argmin(delta_nll))
+    ax.axvline(poi_values[best_idx], color="black", linestyle="-.", linewidth=1.0, label=f"Best fit: {poi_values[best_idx]:.3g}")
+
+    if summary.get("asimov_fit") or summary.get("toy_plot", {}).get("asimov"):
+        title = f"NLL Profile – Asimov ({poi_name})"
+    elif summary.get("observed_fit") or summary.get("toy_plot", {}).get("observed"):
+        title = f"NLL Profile – Observed data ({poi_name})"
+    else:
+        title = f"NLL Profile – Toy {summary['toy']} ({poi_name})"
+
+    ax.set_title(title)
+    ax.set_xlabel(poi_name)
+    ax.set_ylabel(r"$\Delta$ NLL")
+    ax.legend(fontsize=9)
+    ax.grid(alpha=0.25)
+    fig.tight_layout()
+    fig.savefig(os.path.join(plot_dir, f"nll_profile_{summary['toy']:04d}.png"), dpi=140)
+    plt.close(fig)

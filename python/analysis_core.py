@@ -209,7 +209,8 @@ def _default_poi_scan_upper(poi_param, fit_model, poi_scan_max):
 
     upper = getattr(poi_param, "upper", None)
     if upper is not None and np.isfinite(float(upper)):
-        return float(upper)
+        # Set scan upper to 99% of the parameter upper bound to avoid boundary issues
+        return 0.99 * float(upper)
 
     if poi_param.name.startswith("mu_"):
         return _default_scan_max(poi_param, fit_model)
@@ -286,6 +287,77 @@ def _run_profile_scan_for_loss(loss, poi_param, fit_model, poi_scan_points=41, p
         "poi_scan_points": scan_points,
         "poi_scan_low": float(scan_low),
         "poi_scan_high": float(scan_high),
+    }
+
+
+def _compute_nll_scan_for_plot(loss, minimizer, poi_param, poi_unc, fit_model, poi_scan_max=None, n_points=51):
+    """Profile-likelihood scan of the POI for plotting purposes.
+
+    Scans the POI from (best_fit - 5*sigma) to (best_fit + 5*sigma),
+    where sigma is the Hessian-estimated uncertainty.
+
+    Returns a dict with keys 'poi_values', 'delta_nll_values', and 'poi_name',
+    or None if the scan cannot be performed.
+    """
+    if not getattr(poi_param, "floating", False):
+        return None
+
+    # Get the current (best-fit) POI value
+    poi_best_fit = float(poi_param.value())
+
+    # Get parameter bounds
+    param_lower = getattr(poi_param, "lower", None)
+    param_upper = getattr(poi_param, "upper", None)
+
+    # Set scan bounds based on Hessian uncertainty
+    if poi_unc is not None and np.isfinite(poi_unc) and poi_unc > 0:
+        poi_unc = float(poi_unc)
+        scan_low = poi_best_fit - 5.0 * poi_unc
+        scan_high = poi_best_fit + 5.0 * poi_unc
+    else:
+        # Fall back to default bounds based on parameter limits
+        scan_low = _default_poi_scan_lower(poi_param)
+        scan_high = _default_poi_scan_upper(poi_param, fit_model, poi_scan_max)
+
+    # Clip to parameter bounds (with small margin from upper bound to avoid zfit boundary issues)
+    if param_lower is not None:
+        scan_low = max(scan_low, float(param_lower))
+    if param_upper is not None:
+        # Use 99% of upper bound to avoid boundary issues with zfit
+        scan_high = min(scan_high, 0.99 * float(param_upper))
+
+    if not np.isfinite(scan_low) or not np.isfinite(scan_high) or scan_high <= scan_low:
+        return None
+    scan_values = np.linspace(scan_low, scan_high, int(n_points))
+
+    # Save best-fit values for all parameters (after global fit)
+    bestfit_values = _capture_parameter_values(fit_model.model)
+    was_floating = getattr(poi_param, "floating", True)
+
+    nll_values = []
+    try:
+        poi_param.floating = False
+        for v in scan_values:
+            # Reset all floating nuisance parameters to their best-fit values before each scan point
+            for param in fit_model.model.get_params():
+                if param is not poi_param and getattr(param, "floating", False):
+                    if hasattr(param, "set_value") and param in bestfit_values:
+                        param.set_value(bestfit_values[param])
+            poi_param.set_value(float(v))
+            minimizer.minimize(loss)
+            nll_values.append(float(loss.value()))
+    except Exception:
+        return None
+    finally:
+        poi_param.floating = was_floating
+        _restore_parameter_values(bestfit_values)
+
+    nll_arr = np.asarray(nll_values, dtype=float)
+    delta_nll = nll_arr - float(np.nanmin(nll_arr))
+    return {
+        "poi_name": poi_param.name,
+        "poi_values": scan_values.tolist(),
+        "delta_nll_values": delta_nll.tolist(),
     }
 
 
@@ -450,6 +522,20 @@ def run_analysis(
         summary["toy_plot"] = toy_plot
         summary["observed_fit"] = bool(use_observed_data)
         summary["asimov_fit"] = bool(use_asimov_data)
+
+        if toy_index == 0:
+            nll_scan = _compute_nll_scan_for_plot(
+                loss=loss,
+                minimizer=minimizer,
+                poi_param=poi_param,
+                poi_unc=summary.get("poi_unc_hesse"),
+                fit_model=fit_model,
+                poi_scan_max=poi_scan_max,
+            )
+            if nll_scan is not None:
+                summary["nll_scan"] = nll_scan
+                # Restore best-fit values after scan
+                minimizer.minimize(loss)
 
         poi_true = signal_strength if signal_strength is not None else starting_values.get(poi_param)
         poi_unc = summary.get("poi_unc_hesse")
