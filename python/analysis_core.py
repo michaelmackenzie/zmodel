@@ -149,16 +149,36 @@ def _default_cls_scan_points(fit_model, resolved_fit_mode, cls_scan_points):
     return 25
 
 
+def _expected_counts_by_channel(fit_model):
+    channel_expectations = {}
+    term_channels = getattr(fit_model, "term_channels", {}) or {}
+    for term_name, yield_param in getattr(fit_model, "yields", {}).items():
+        channel = term_channels.get(term_name)
+        if channel is None:
+            continue
+        channel_expectations[channel] = channel_expectations.get(channel, 0.0) + float(yield_param.value())
+    return channel_expectations
+
+
 def _build_toy_data(fit_model, resolved_fit_mode, binned_space, is_counting):
     if resolved_fit_mode == "binned":
         if is_counting:
             expected = float(fit_model.model.get_yield().value())
-            toy_count = int(np.random.poisson(expected))
+            channel_expectations = _expected_counts_by_channel(fit_model)
+            channel_counts = {}
+            if channel_expectations:
+                for channel, value in channel_expectations.items():
+                    channel_counts[channel] = float(np.random.poisson(max(0.0, value)))
+                toy_count = int(sum(channel_counts.values()))
+            else:
+                toy_count = int(np.random.poisson(expected))
             low, high = fit_model.obs_range
             edges = np.array([float(low), float(high)], dtype=float)
             counts = np.array([float(toy_count)], dtype=float)
             data = zfit.data.BinnedData.from_tensor(space=binned_space, values=counts)
             toy_plot = {"mode": "binned", "edges": edges, "counts": counts}
+            if channel_counts:
+                toy_plot["channel_counts"] = channel_counts
             return data, toy_count, toy_plot
 
         data, values, edges, counts = _make_binned_toy_data(fit_model.model, binned_space)
@@ -176,7 +196,7 @@ def _build_toy_data(fit_model, resolved_fit_mode, binned_space, is_counting):
     return data, None, toy_plot
 
 
-def _build_asimov_binned_data(binned_model, binned_space):
+def _build_asimov_binned_data(binned_model, binned_space, fit_model):
     data = binned_model.to_binneddata()
     expected_counts = np.asarray(binned_model.values(), dtype=float).reshape(-1)
     edges = _binning_edges_as_float_array(binned_space.binning)
@@ -186,6 +206,9 @@ def _build_asimov_binned_data(binned_model, binned_space):
         "counts": expected_counts,
         "asimov": True,
     }
+    channel_expectations = _expected_counts_by_channel(fit_model)
+    if channel_expectations:
+        toy_plot["channel_counts"] = channel_expectations
     return data, expected_counts, toy_plot
 
 
@@ -505,7 +528,7 @@ def run_analysis(
                     counts = np.array([observed_count], dtype=float)
                     data = zfit.data.BinnedData.from_tensor(space=binned_space, values=counts)
             elif use_asimov_data:
-                data, _, _ = _build_asimov_binned_data(binned_model, binned_space)
+                data, _, _ = _build_asimov_binned_data(binned_model, binned_space, fit_model)
             else:
                 data, _, _ = _build_toy_data(fit_model, resolved_fit_mode, binned_space, is_counting)
             loss = _build_loss(fit_model, resolved_fit_mode, binned_model, data)
@@ -574,6 +597,11 @@ def run_analysis(
                     "values": observed_values,
                     "observed": True,
                 }
+                if getattr(fit_model, "observed_counts_by_channel", None):
+                    toy_plot["channel_counts"] = {
+                        k: float(v)
+                        for k, v in fit_model.observed_counts_by_channel.items()
+                    }
             else:
                 data = fit_model.data
                 if hasattr(data, "value"):
@@ -581,9 +609,14 @@ def run_analysis(
                 else:
                     observed_values = np.array([float(data)], dtype=float)
                 toy_plot = {"mode": "unbinned", "values": observed_values, "observed": True}
+                if getattr(fit_model, "observed_values_by_channel", None):
+                    toy_plot["channel_values"] = {
+                        k: np.asarray(v, dtype=float).reshape(-1)
+                        for k, v in fit_model.observed_values_by_channel.items()
+                    }
             toy_count = None
         elif use_asimov_data:
-            data, toy_count, toy_plot = _build_asimov_binned_data(binned_model, binned_space)
+            data, toy_count, toy_plot = _build_asimov_binned_data(binned_model, binned_space, fit_model)
         else:
             data, toy_count, toy_plot = _build_toy_data(
                 fit_model=fit_model,

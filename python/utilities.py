@@ -25,6 +25,11 @@ class FitModel:
     loss: Optional[Any] = None
     result: Optional[Any] = None
     signal_nominal_yield: Optional[float] = None
+    channels: List[str] = field(default_factory=list)
+    term_channels: Dict[str, str] = field(default_factory=dict)
+    term_processes: Dict[str, str] = field(default_factory=dict)
+    observed_counts_by_channel: Dict[str, float] = field(default_factory=dict)
+    observed_values_by_channel: Dict[str, Any] = field(default_factory=dict)
 
 # ==============================================================================
 # Helper Function: Convert a ROOT Histogram to zfit-compatible BinnedData

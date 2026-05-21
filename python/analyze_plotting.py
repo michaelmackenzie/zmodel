@@ -69,6 +69,62 @@ def _find_total_signal_category(fit_model):
     return None
 
 
+def _safe_name(value):
+    text = str(value)
+    return "".join(ch if ch.isalnum() or ch in ("_", "-") else "_" for ch in text)
+
+
+def _plot_categories(summary, fit_model):
+    toy_plot = summary.get("toy_plot", {})
+    channel_values = toy_plot.get("channel_values")
+    if isinstance(channel_values, dict) and channel_values:
+        return list(channel_values.keys())
+
+    channel_counts = toy_plot.get("channel_counts")
+    if isinstance(channel_counts, dict) and channel_counts:
+        return list(channel_counts.keys())
+
+    channels = list(getattr(fit_model, "channels", []) or [])
+    if len(channels) > 1:
+        return channels
+
+    return [None]
+
+
+def _term_process_name(fit_model, term_name):
+    term_processes = getattr(fit_model, "term_processes", {}) or {}
+    if term_name in term_processes:
+        return term_processes[term_name]
+    if "__" in term_name:
+        return term_name.split("__", 1)[0]
+    return term_name
+
+
+def _component_counts_by_channel(fit_model, edges, channel):
+    total = np.zeros(len(edges) - 1, dtype=float)
+    signal = np.zeros(len(edges) - 1, dtype=float)
+    background = np.zeros(len(edges) - 1, dtype=float)
+    term_channels = getattr(fit_model, "term_channels", {}) or {}
+
+    for term_name, shape in getattr(fit_model, "shapes", {}).items():
+        if term_name not in getattr(fit_model, "yields", {}):
+            continue
+
+        term_channel = term_channels.get(term_name)
+        if channel is not None and term_channel is not None and term_channel != channel:
+            continue
+
+        comp = _binned_component_counts(shape, fit_model.yields[term_name].value(), edges)
+        total = total + comp
+        process = _term_process_name(fit_model, term_name)
+        if getattr(fit_model, "signal_process", None) is not None and process == fit_model.signal_process:
+            signal = signal + comp
+        else:
+            background = background + comp
+
+    return total, signal, background
+
+
 def plot_dataset_and_components(summary, fit_model, plot_dir, binned_bins):
     import matplotlib
 
@@ -86,121 +142,113 @@ def plot_dataset_and_components(summary, fit_model, plot_dir, binned_bins):
     _restore_fit_params_by_name(fit_model, fit_params)
 
     try:
-        fig, ax = plt.subplots(figsize=(8, 5))
         mode = toy_plot.get("mode")
-        signal_category = _find_total_signal_category(fit_model)
+        categories = _plot_categories(summary, fit_model)
 
         if summary.get("asimov_fit") or toy_plot.get("asimov"):
             data_label = "Asimov data"
+            title_prefix = "Asimov Data and Fit Components"
         elif summary.get("observed_fit") or toy_plot.get("observed"):
             data_label = "Observed data"
+            title_prefix = "Observed Data and Fit Components"
         else:
             data_label = "Toy data"
+            title_prefix = f"Toy {summary['toy']} Dataset and Fit Components"
 
-        if mode == "binned":
-            edges = np.asarray(toy_plot["edges"], dtype=float).reshape(-1)
-            counts = np.asarray(toy_plot["counts"], dtype=float).reshape(-1)
-            centers = 0.5 * (edges[:-1] + edges[1:])
-            yerr = np.sqrt(np.maximum(counts, 1.0))
+        for category in categories:
+            fig, ax = plt.subplots(figsize=(8, 5))
 
-            ax.errorbar(
-                centers,
-                counts,
-                yerr=yerr,
-                fmt="o",
-                color="black",
-                markersize=4,
-                capsize=2,
-                label=data_label,
-            )
+            if mode == "binned":
+                edges = np.asarray(toy_plot["edges"], dtype=float).reshape(-1)
+                counts = np.asarray(toy_plot["counts"], dtype=float).reshape(-1)
+                channel_counts = toy_plot.get("channel_counts")
+                if category is not None and isinstance(channel_counts, dict):
+                    if len(counts) == 1:
+                        counts = np.array([float(channel_counts.get(category, 0.0))], dtype=float)
+                    else:
+                        # Multi-bin per-channel datasets are only supported when explicit channel values are provided.
+                        if "channel_values" not in toy_plot:
+                            plt.close(fig)
+                            continue
 
-            total_counts = np.asarray(summary.get("total_model_counts", []), dtype=float)
-            if total_counts.size == 0:
-                model_values = np.asarray(fit_model.model.sample(n="auto").value(), dtype=float).reshape(-1)
-                total_counts, _ = np.histogram(model_values, bins=edges)
-            ax.step(edges[:-1], total_counts, where="post", color="black", linewidth=1.8, label="Total model")
+                centers = 0.5 * (edges[:-1] + edges[1:])
+                yerr = np.sqrt(np.maximum(counts, 1.0))
 
-            if summary.get("background_model_counts") is not None:
-                bkg_counts = np.asarray(summary["background_model_counts"], dtype=float)
-                ax.step(edges[:-1], bkg_counts, where="post", color="tab:blue", linestyle="--", linewidth=1.6, label="Total background")
+                ax.errorbar(
+                    centers,
+                    counts,
+                    yerr=yerr,
+                    fmt="o",
+                    color="black",
+                    markersize=4,
+                    capsize=2,
+                    label=data_label,
+                )
 
-            if summary.get("signal_model_counts") is not None:
-                sig_counts = np.asarray(summary["signal_model_counts"], dtype=float)
-                ax.step(edges[:-1], sig_counts, where="post", color="tab:red", linestyle="-.", linewidth=1.6, label="Signal")
+                total_counts, sig_counts, bkg_counts = _component_counts_by_channel(fit_model, edges, category)
+                if not np.any(total_counts):
+                    total_counts = np.asarray(summary.get("total_model_counts", []), dtype=float)
+                if total_counts.size:
+                    ax.step(edges[:-1], total_counts, where="post", color="black", linewidth=1.8, label="Total model")
+                if bkg_counts.size:
+                    ax.step(edges[:-1], bkg_counts, where="post", color="tab:blue", linestyle="--", linewidth=1.6, label="Total background")
+                if sig_counts.size:
+                    ax.step(edges[:-1], sig_counts, where="post", color="tab:red", linestyle="-.", linewidth=1.6, label="Signal")
 
-            ax.set_xlabel(fit_model.obs.obs[0] if getattr(fit_model.obs, "obs", None) else "obs")
-            ax.set_ylabel("Entries")
+                ax.set_xlabel(fit_model.obs.obs[0] if getattr(fit_model.obs, "obs", None) else "obs")
+                ax.set_ylabel("Entries")
 
-        else:
-            values = np.asarray(toy_plot["values"], dtype=float)
-            lower, upper = fit_model.obs_range
-            bins = np.linspace(float(lower), float(upper), int(binned_bins) + 1)
-            counts, edges = np.histogram(values, bins=bins)
-            centers = 0.5 * (edges[:-1] + edges[1:])
-            yerr = np.sqrt(np.maximum(counts, 1.0))
-
-            ax.errorbar(
-                centers,
-                counts,
-                yerr=yerr,
-                fmt="o",
-                color="black",
-                markersize=4,
-                capsize=2,
-                label=data_label,
-            )
-
-            total_y = np.zeros_like(counts, dtype=float)
-            if getattr(fit_model, "shapes", None) and getattr(fit_model, "yields", None):
-                for category, shape in fit_model.shapes.items():
-                    if category not in fit_model.yields:
-                        continue
-                    total_y = total_y + _binned_component_counts(shape, fit_model.yields[category].value(), edges)
-            if not np.any(total_y):
-                x_plot = np.linspace(float(lower), float(upper), 1000)
-                total_y = np.asarray(fit_model.model.pdf(x_plot), dtype=float).reshape(-1)
-                if hasattr(fit_model.model, "get_yield"):
-                    total_y = total_y * float(fit_model.model.get_yield().value()) * (x_plot[1] - x_plot[0])
-                ax.plot(x_plot, total_y, color="black", linewidth=1.8, label="Total model")
             else:
-                ax.plot(centers, total_y, color="black", linewidth=1.8, label="Total model")
-
-            signal_pdf = None
-            for category in _get_category_names(fit_model):
-                if category == signal_category:
-                    signal_pdf = fit_model.shapes.get(category) if getattr(fit_model, "shapes", None) else None
-
-            if signal_pdf is not None and getattr(fit_model, "yields", None) and signal_category in fit_model.yields:
-                sig_y = _binned_component_counts(signal_pdf, fit_model.yields[signal_category].value(), edges)
-                ax.plot(centers, sig_y, color="tab:red", linestyle="-.", linewidth=1.6, label="Signal")
-
-            if getattr(fit_model, "shapes", None) and getattr(fit_model, "yields", None):
-                bkg_y = np.zeros_like(total_y, dtype=float)
-                for category, shape in fit_model.shapes.items():
-                    if category == signal_category:
+                values_source = toy_plot.get("values")
+                if category is not None:
+                    channel_values = toy_plot.get("channel_values")
+                    if isinstance(channel_values, dict) and category in channel_values:
+                        values_source = channel_values[category]
+                    else:
+                        plt.close(fig)
                         continue
-                    if category not in fit_model.yields:
-                        continue
-                    comp_y = _binned_component_counts(shape, fit_model.yields[category].value(), edges)
-                    bkg_y = bkg_y + comp_y
-                ax.plot(centers, bkg_y, color="tab:blue", linestyle="--", linewidth=1.6, label="Total background")
 
-            ax.set_xlabel(fit_model.obs.obs[0] if getattr(fit_model.obs, "obs", None) else "obs")
-            ax.set_ylabel("Entries")
+                values = np.asarray(values_source, dtype=float)
+                lower, upper = fit_model.obs_range
+                bins = np.linspace(float(lower), float(upper), int(binned_bins) + 1)
+                counts, edges = np.histogram(values, bins=bins)
+                centers = 0.5 * (edges[:-1] + edges[1:])
+                yerr = np.sqrt(np.maximum(counts, 1.0))
 
-        if summary.get("asimov_fit") or toy_plot.get("asimov"):
-            title = "Asimov Data and Fit Components"
-        elif summary.get("observed_fit") or toy_plot.get("observed"):
-            title = "Observed Data and Fit Components"
-        else:
-            title = f"Toy {summary['toy']} Dataset and Fit Components"
+                ax.errorbar(
+                    centers,
+                    counts,
+                    yerr=yerr,
+                    fmt="o",
+                    color="black",
+                    markersize=4,
+                    capsize=2,
+                    label=data_label,
+                )
 
-        ax.set_title(title)
-        ax.legend()
-        ax.grid(alpha=0.25)
-        fig.tight_layout()
-        fig.savefig(os.path.join(plot_dir, f"toy_{summary['toy']:04d}_dataset_fit.png"), dpi=140)
-        plt.close(fig)
+                total_y, sig_y, bkg_y = _component_counts_by_channel(fit_model, edges, category)
+                if np.any(total_y):
+                    ax.plot(centers, total_y, color="black", linewidth=1.8, label="Total model")
+                if np.any(sig_y):
+                    ax.plot(centers, sig_y, color="tab:red", linestyle="-.", linewidth=1.6, label="Signal")
+                if np.any(bkg_y):
+                    ax.plot(centers, bkg_y, color="tab:blue", linestyle="--", linewidth=1.6, label="Total background")
+
+                ax.set_xlabel(fit_model.obs.obs[0] if getattr(fit_model.obs, "obs", None) else "obs")
+                ax.set_ylabel("Entries")
+
+            title = title_prefix
+            file_suffix = ""
+            if category is not None:
+                title = f"{title_prefix} [{category}]"
+                file_suffix = f"_{_safe_name(category)}"
+
+            ax.set_title(title)
+            ax.legend()
+            ax.grid(alpha=0.25)
+            fig.tight_layout()
+            fig.savefig(os.path.join(plot_dir, f"toy_{summary['toy']:04d}_dataset_fit{file_suffix}.png"), dpi=140)
+            plt.close(fig)
     finally:
         _restore_parameter_values(baseline_values)
 

@@ -1,7 +1,7 @@
 import os
 import pickle
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import dill
 import numpy as np
@@ -27,22 +27,46 @@ class ConstraintSpec:
 
 
 @dataclass
+class ShapeSpec:
+    process: str
+    channel: str
+    file: str
+
+
+@dataclass
 class CardSpec:
-    shape_files: Dict[str, str]
+    shape_specs: List[ShapeSpec]
     is_counting: bool
-    category: str
+    channels: List[str]
+    bin_names: List[str]
     process_names: List[str]
     process_ids: List[int]
-    rates: Dict[str, float]
+    rates: List[Optional[float]]
     uncertainties: List[UncertaintySpec]
-    data_obs_file: Optional[str] = None
-    observation_category: Optional[str] = None
+    observations: Dict[str, float]
+    data_obs_files: Dict[str, str]
+    category: Optional[str] = None
     observation_count: Optional[float] = None
     param_constraints: List[ConstraintSpec] = None
 
     def __post_init__(self):
         if self.param_constraints is None:
             self.param_constraints = []
+        if self.category is None and self.channels:
+            self.category = self.channels[0]
+        if self.observation_count is None and self.observations:
+            self.observation_count = float(sum(self.observations.values()))
+
+
+def _has_shape_mapping(shape_specs: List[ShapeSpec], process: str, channel: str) -> bool:
+    for spec in shape_specs:
+        if spec.process.lower() == "data_obs":
+            continue
+        process_match = spec.process == "*" or spec.process == process
+        channel_match = spec.channel == "*" or spec.channel == channel
+        if process_match and channel_match:
+            return True
+    return False
 
 
 def _tokenize_card_line(line: str) -> List[str]:
@@ -60,17 +84,17 @@ def parse_model_card(card_path: str) -> CardSpec:
 
     tokens = [line for line in lines if line]
 
-    shape_files: Dict[str, str] = {}
-    category: Optional[str] = None
+    shape_specs: List[ShapeSpec] = []
+    bin_names: Optional[List[str]] = None
     process_names: Optional[List[str]] = None
     process_ids: Optional[List[int]] = None
-    rates: Dict[str, float] = {}
+    rates: Optional[List[Optional[float]]] = None
     uncertainties: List[UncertaintySpec] = []
     param_constraints: List[ConstraintSpec] = []
     process_line_count = 0
-    data_obs_file: Optional[str] = None
-    observation_category: Optional[str] = None
-    observation_count: Optional[float] = None
+    observations: Dict[str, float] = {}
+    data_obs_files: Dict[str, str] = {}
+    legacy_observation_count: Optional[float] = None
     comment_markers = {"#", "//", "--"}
 
     for fields in tokens:
@@ -80,30 +104,36 @@ def parse_model_card(card_path: str) -> CardSpec:
         if not key:
             continue
 
-        if key in ("shape", "shapes") and len(fields) >= 2 and fields[1].lower() == "data_obs":
-            if len(fields) != 3:
-                raise ValueError(f"Invalid data_obs shape line: {' '.join(fields)}")
-            if not fields[2].lower().endswith(".pkl"):
-                raise ValueError(
-                    f"Observed data file '{fields[2]}' must be a pickle file (.pkl)"
-                )
-            data_obs_file = fields[2]
-            continue
-
         if key == "shapes":
-            if len(fields) != 3:
+            if len(fields) not in (3, 4):
                 raise ValueError(f"Invalid shapes line: {' '.join(fields)}")
-            if not fields[2].lower().endswith(".pkl"):
+
+            if len(fields) == 3:
+                process_target = fields[1]
+                channel_target = "*"
+                file_name = fields[2]
+            else:
+                process_target = fields[1]
+                channel_target = fields[2]
+                file_name = fields[3]
+
+            if not file_name.lower().endswith(".pkl"):
                 raise ValueError(
-                    f"Shape file '{fields[2]}' must be a pickle file (.pkl)"
+                    f"Shape file '{file_name}' must be a pickle file (.pkl)"
                 )
-            shape_files[fields[1]] = fields[2]
+
+            if process_target.lower() == "data_obs":
+                data_obs_files[channel_target] = file_name
+            else:
+                shape_specs.append(
+                    ShapeSpec(process=process_target, channel=channel_target, file=file_name)
+                )
             continue
 
         if key == "bin":
-            if len(fields) != 2:
+            if len(fields) < 2:
                 raise ValueError(f"Invalid bin line: {' '.join(fields)}")
-            category = fields[1]
+            bin_names = fields[1:]
             continue
 
         if key == "process":
@@ -122,18 +152,18 @@ def parse_model_card(card_path: str) -> CardSpec:
             values = fields[1:]
             if len(values) != len(process_names):
                 raise ValueError("rate line length does not match process count")
-            for process, value in zip(process_names, values):
-                if value != "-":
-                    rates[process] = float(value)
+            rates = [None if value == "-" else float(value) for value in values]
             continue
 
         if key == "observation":
+            if len(fields) == 2:
+                legacy_observation_count = float(fields[1])
+                continue
             if len(fields) != 3:
                 raise ValueError(
                     f"Invalid observation line: {' '.join(fields)}. Expected 'observation <category> <count>'"
                 )
-            observation_category = fields[1]
-            observation_count = float(fields[2])
+            observations[fields[1]] = float(fields[2])
             continue
 
         if len(fields) >= 4 and fields[1].lower() == "param":
@@ -150,18 +180,41 @@ def parse_model_card(card_path: str) -> CardSpec:
 
         uncertainties.append(UncertaintySpec(name=fields[0], kind=fields[1], values=fields[2:]))
 
-    if category is None:
+    if bin_names is None:
         raise ValueError("Missing bin line")
     if process_names is None:
         raise ValueError("Missing process names line")
     if process_ids is None:
         raise ValueError("Missing process id line")
+    if rates is None:
+        raise ValueError("Missing rate line")
     if len(process_names) != len(process_ids):
         raise ValueError("process names and IDs length mismatch")
+    if len(bin_names) == 1 and len(process_names) > 1:
+        bin_names = [bin_names[0]] * len(process_names)
+    if len(bin_names) != len(process_names):
+        raise ValueError("bin line length does not match process count")
 
-    is_counting = len(shape_files) == 0
-    if not is_counting and "*" not in shape_files:
-        raise ValueError("Missing default shape mapping: shapes * <file>")
+    channels = list(dict.fromkeys(bin_names))
+
+    if legacy_observation_count is not None:
+        if len(channels) != 1:
+            raise ValueError("Single-value observation is only allowed for single-category cards")
+        observations[channels[0]] = legacy_observation_count
+
+    if observations:
+        unknown_obs = [name for name in observations if name not in channels]
+        if unknown_obs:
+            raise ValueError(f"Observation category not present in bin line: {unknown_obs}")
+
+    is_counting = len(shape_specs) == 0
+    if not is_counting:
+        for process, channel in zip(process_names, bin_names):
+            if not _has_shape_mapping(shape_specs, process, channel):
+                raise ValueError(
+                    f"Missing shape mapping for process/channel '{process}/{channel}'. "
+                    "Expected a matching line: shapes <process|*> <channel|*> <file>"
+                )
 
     for unc in uncertainties:
         if len(unc.values) != len(process_names):
@@ -174,16 +227,16 @@ def parse_model_card(card_path: str) -> CardSpec:
             )
 
     return CardSpec(
-        shape_files=shape_files,
+        shape_specs=shape_specs,
         is_counting=is_counting,
-        category=category,
+        channels=channels,
+        bin_names=bin_names,
         process_names=process_names,
         process_ids=process_ids,
         rates=rates,
         uncertainties=uncertainties,
-        data_obs_file=data_obs_file,
-        observation_category=observation_category,
-        observation_count=observation_count,
+        observations=observations,
+        data_obs_files=data_obs_files,
         param_constraints=param_constraints,
     )
 
@@ -197,27 +250,47 @@ def _load_shape_payload_from_file(file_path: str):
             return dill.load(handle)
 
 
+def _shape_mapping_rank(spec: ShapeSpec, process: str, channel: str) -> Optional[Tuple[int, int]]:
+    process_match = spec.process == "*" or spec.process == process
+    channel_match = spec.channel == "*" or spec.channel == channel
+    if not (process_match and channel_match):
+        return None
+    specificity = int(spec.process != "*") + int(spec.channel != "*")
+    return (specificity, 0)
+
+
+def _resolve_shape_file_for_term(card: CardSpec, process: str, channel: str) -> str:
+    best_spec = None
+    best_rank = None
+    for idx, spec in enumerate(card.shape_specs):
+        rank = _shape_mapping_rank(spec, process, channel)
+        if rank is None:
+            continue
+        ranked = (rank[0], idx)
+        if best_rank is None or ranked > best_rank:
+            best_rank = ranked
+            best_spec = spec
+
+    if best_spec is None:
+        raise ValueError(
+            f"No shape mapping found for process/channel '{process}/{channel}'"
+        )
+    return best_spec.file
+
+
 def _resolve_shape_payloads(card: CardSpec, card_dir: str):
     payloads = {}
-    process_to_payload = {}
 
-    for target, rel_path in card.shape_files.items():
+    term_payloads = []
+    for process, channel in zip(card.process_names, card.bin_names):
+        rel_path = _resolve_shape_file_for_term(card, process, channel)
         full_path = rel_path if os.path.isabs(rel_path) else os.path.join(card_dir, rel_path)
         full_path = os.path.abspath(full_path)
         if full_path not in payloads:
             payloads[full_path] = _load_shape_payload_from_file(full_path)
-        if target != "*":
-            process_to_payload[target] = payloads[full_path]
+        term_payloads.append(payloads[full_path])
 
-    default_rel = card.shape_files["*"]
-    default_path = default_rel if os.path.isabs(default_rel) else os.path.join(card_dir, default_rel)
-    default_path = os.path.abspath(default_path)
-    default_payload = payloads[default_path]
-
-    for process in card.process_names:
-        process_to_payload.setdefault(process, default_payload)
-
-    return process_to_payload
+    return term_payloads
 
 
 def _observed_entries_from_dataset(data_obs) -> Optional[float]:
@@ -440,51 +513,120 @@ def _kind_token(kind: str) -> str:
 
 
 def build_model_from_card(card: CardSpec, card_dir: str):
+    term_names = []
+    name_counts: Dict[str, int] = {}
+    multiple_channels = len(set(card.bin_names)) > 1
+    for process, channel in zip(card.process_names, card.bin_names):
+        if multiple_channels:
+            base = f"{process}__{channel}"
+        else:
+            base = process
+        safe_base = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in base)
+        index = name_counts.get(safe_base, 0)
+        name_counts[safe_base] = index + 1
+        if index:
+            term_names.append(f"{safe_base}_{index}")
+        else:
+            term_names.append(safe_base)
+
     shapes = {}
     nominal_rates = {}
-    process_payloads = {}
+    process_payloads = []
+    term_channels = {
+        term_name: channel
+        for term_name, channel in zip(term_names, card.bin_names)
+    }
+    term_processes = {
+        term_name: process
+        for term_name, process in zip(term_names, card.process_names)
+    }
+    observed_counts_by_channel: Dict[str, float] = {}
+    observed_values_by_channel: Dict[str, np.ndarray] = {}
 
     observed_data = None
 
     if card.is_counting:
         obs_space = zfit.Space("count_obs", limits=(0.0, 1.0))
         obs_limits = (0.0, 1.0)
-        for process in card.process_names:
-            shapes[process] = zfit.pdf.Uniform(obs=obs_space, low=0.0, high=1.0, name=f"{process}_counting_pdf")
-            nominal_rates[process] = float(card.rates.get(process, 1.0))
+        for term_name, rate in zip(term_names, card.rates):
+            shapes[term_name] = zfit.pdf.Uniform(obs=obs_space, low=0.0, high=1.0, name=f"{term_name}_counting_pdf")
+            nominal_rates[term_name] = float(1.0 if rate is None else rate)
 
-        if card.observation_count is not None:
+        if card.observations:
+            observed_data = float(sum(card.observations.values()))
+            observed_counts_by_channel = {k: float(v) for k, v in card.observations.items()}
+        elif card.observation_count is not None:
             observed_data = float(card.observation_count)
     else:
         process_payloads = _resolve_shape_payloads(card, card_dir)
-        for process in card.process_names:
-            payload = process_payloads[process]
-            shapes[process] = get_nominal_pdf(payload, process)
-            nominal_rates[process] = get_nominal_rate(payload, process, card.rates.get(process))
+        for term_name, process, payload, rate in zip(term_names, card.process_names, process_payloads, card.rates):
+            shapes[term_name] = get_nominal_pdf(payload, process)
+            nominal_rates[term_name] = get_nominal_rate(payload, process, rate)
 
-        first_shape = shapes[card.process_names[0]]
+        first_shape = shapes[term_names[0]]
         obs_space = first_shape.space
         obs_limits = tuple(float(x) for x in first_shape.space.limit1d)
 
-        if card.data_obs_file is not None:
-            obs_path = card.data_obs_file
+        for term_name in term_names[1:]:
+            candidate_limits = tuple(float(x) for x in shapes[term_name].space.limit1d)
+            if candidate_limits != obs_limits:
+                raise ValueError(
+                    "All channels must share the same observable limits to build a combined model"
+                )
+
+        if card.data_obs_files:
+            # The current analysis pipeline expects one observed dataset.
+            # If multiple channel files are provided, load each and merge rows.
+            merged_rows = []
+            for channel in card.channels:
+                obs_rel = card.data_obs_files.get(channel, card.data_obs_files.get("*"))
+                if obs_rel is None:
+                    continue
+                obs_path = obs_rel
+                if not os.path.isabs(obs_path):
+                    obs_path = os.path.join(card_dir, obs_path)
+                obs_payload = _load_shape_payload_from_file(os.path.abspath(obs_path))
+                channel_data = _coerce_unbinned_data_obs(obs_space, _extract_data_obs_payload(obs_payload))
+                if channel_data is None:
+                    continue
+                channel_values = np.asarray(channel_data.value(), dtype=float)
+                if channel_values.ndim == 1:
+                    channel_values = channel_values.reshape(-1, 1)
+                observed_values_by_channel[channel] = channel_values.reshape(-1)
+                merged_rows.append(channel_values)
+
+            if merged_rows:
+                observed_data = zfit.Data.from_numpy(obs=obs_space, array=np.vstack(merged_rows))
+
+        elif "*" in card.data_obs_files:
+            obs_path = card.data_obs_files["*"]
             if not os.path.isabs(obs_path):
                 obs_path = os.path.join(card_dir, obs_path)
             obs_payload = _load_shape_payload_from_file(os.path.abspath(obs_path))
             observed_data = _coerce_unbinned_data_obs(obs_space, _extract_data_obs_payload(obs_payload))
+            if observed_data is not None and len(card.channels) == 1:
+                observed_values_by_channel[card.channels[0]] = np.asarray(observed_data.value(), dtype=float).reshape(-1)
 
-        if observed_data is not None and card.observation_count is not None:
+        expected_observation = float(sum(card.observations.values())) if card.observations else card.observation_count
+        if observed_data is not None and expected_observation is not None:
             observed_entries = _observed_entries_from_dataset(observed_data)
-            if observed_entries is not None and not np.isclose(observed_entries, card.observation_count, atol=0.5):
+            if observed_entries is not None and not np.isclose(observed_entries, expected_observation, atol=0.5):
                 raise ValueError(
-                    f"Observation count ({card.observation_count}) does not match data_obs entries ({observed_entries})"
+                    f"Observation count ({expected_observation}) does not match data_obs entries ({observed_entries})"
                 )
 
     constraints = []
-    rate_factors = {name: [] for name in card.process_names}
+    rate_factors = {name: [] for name in term_names}
 
-    process_id_map = dict(zip(card.process_names, card.process_ids))
-    signal_processes = {name for name, proc_id in process_id_map.items() if proc_id < 0}
+    signal_processes = {
+        process
+        for process, proc_id in zip(card.process_names, card.process_ids)
+        if proc_id < 0
+    }
+    process_id_map = {
+        process: proc_id
+        for process, proc_id in zip(card.process_names, card.process_ids)
+    }
 
     for unc in card.uncertainties:
         kind = _kind_token(unc.kind)
@@ -498,24 +640,24 @@ def build_model_from_card(card: CardSpec, card_dir: str):
                     uncertainty=1.0,
                 )
             )
-            for process, raw_value in zip(card.process_names, unc.values):
+            for term_name, process, raw_value in zip(term_names, card.process_names, unc.values):
                 if raw_value == "-":
                     continue
                 value = float(raw_value)
                 if kind == "lnN":
                     factor = zfit.ComposedParameter(
-                        f"scale_{unc.name}_{process}",
+                        f"scale_{unc.name}_{term_name}",
                         lambda t, v=value: znp.power(v, t),
                         params=[theta],
                     )
                 else:
                     sigma = value - 1.0 if value >= 1.0 else value
                     factor = zfit.ComposedParameter(
-                        f"scale_{unc.name}_{process}",
+                        f"scale_{unc.name}_{term_name}",
                         lambda t, s=sigma: znp.maximum(0.0, 1.0 + s * t),
                         params=[theta],
                     )
-                rate_factors[process].append(factor)
+                rate_factors[term_name].append(factor)
             continue
 
         theta = zfit.Parameter(f"nuis_shape_{unc.name}", 0.0, -1.0, 1.0)
@@ -530,44 +672,48 @@ def build_model_from_card(card: CardSpec, card_dir: str):
             raise ValueError(
                 f"Shape uncertainty '{unc.name}' is not allowed for counting models"
             )
-        for process, raw_value in zip(card.process_names, unc.values):
+        for term_name, process, payload, raw_value in zip(term_names, card.process_names, process_payloads, unc.values):
             if raw_value == "-":
                 continue
             if raw_value != "1":
                 raise ValueError(
                     f"Shape uncertainty value for {unc.name}/{process} must be '1' or '-', got {raw_value}"
                 )
-            payload = process_payloads[process]
             up_pdf = get_shape_variation_pdf(payload, process, unc.name, "Up")
             down_pdf = get_shape_variation_pdf(payload, process, unc.name, "Down")
-            shapes[process] = make_shape_morphed_pdf(
-                nominal_pdf=shapes[process],
+            shapes[term_name] = make_shape_morphed_pdf(
+                nominal_pdf=shapes[term_name],
                 up_pdf=up_pdf,
                 down_pdf=down_pdf,
                 theta=theta,
-                name=f"{unc.name}_{process}",
+                name=f"{unc.name}_{term_name}",
             )
 
     yields: Dict[str, zfit.Parameter] = {}
-    for process in card.process_names:
-        base = nominal_rates[process]
-        all_factors = list(rate_factors[process])
+    signal_strength_params: Dict[str, zfit.Parameter] = {}
+    for term_name, process in zip(term_names, card.process_names):
+        base = nominal_rates[term_name]
+        all_factors = list(rate_factors[term_name])
 
         if process in signal_processes:
-            mu = zfit.Parameter(f"mu_{process}", 1.0, 0.0, 100.0)
+            mu = signal_strength_params.get(process)
+            if mu is None:
+                mu = zfit.Parameter(f"mu_{process}", 1.0, 0.0, 100.0)
+                signal_strength_params[process] = mu
             all_factors.insert(0, mu)
 
-        yields[process] = multiply_factors(
+        yields[term_name] = multiply_factors(
             base=base,
             factors=all_factors,
-            name=f"yield_{process}",
+            name=f"yield_{term_name}",
         )
 
     extended_pdfs = {
-        process: shapes[process].create_extended(yields[process])
-        for process in card.process_names
+        term_name: shapes[term_name].create_extended(yields[term_name])
+        for term_name in term_names
     }
-    model = zfit.pdf.SumPDF(list(extended_pdfs.values()), name=f"model_{card.category}")
+    model_name = f"model_{card.category}" if len(card.channels) == 1 else "model_combined"
+    model = zfit.pdf.SumPDF(list(extended_pdfs.values()), name=model_name)
 
     # Apply explicit parameter Gaussian constraints from 'param' card lines.
     # Collect all named parameters from the model for lookup.
@@ -587,8 +733,16 @@ def build_model_from_card(card: CardSpec, card_dir: str):
             )
         )
 
-    signal_name = next((name for name in card.process_names if process_id_map[name] < 0), None)
-    signal_nominal_yield = nominal_rates.get(signal_name) if signal_name is not None else None
+    signal_name = next((name for name, proc_id in process_id_map.items() if proc_id < 0), None)
+    signal_nominal_yield = None
+    if signal_name is not None:
+        signal_nominal_yield = float(
+            sum(
+                nominal_rates[term_name]
+                for term_name, process in zip(term_names, card.process_names)
+                if process == signal_name
+            )
+        )
 
     return FitModel(
         obs=obs_space,
@@ -598,12 +752,17 @@ def build_model_from_card(card: CardSpec, card_dir: str):
         extended_pdfs=extended_pdfs,
         model=model,
         data=observed_data,
-        process_names=list(card.process_names),
+        process_names=list(term_names),
         signal_process=signal_name,
         constraints=constraints,
         loss=None,
         result=None,
         signal_nominal_yield=signal_nominal_yield,
+        channels=list(card.channels),
+        term_channels=term_channels,
+        term_processes=term_processes,
+        observed_counts_by_channel=observed_counts_by_channel,
+        observed_values_by_channel=observed_values_by_channel,
     )
 
 
@@ -615,8 +774,10 @@ def build_and_save_model_from_card_file(input_card: str, output_file: str) -> st
     fit_model = build_model_from_card(card, card_dir)
 
     # Always include observed data in the bundle if present
-    # For counting models, this is just the observation_count
-    if card.is_counting and card.observation_count is not None:
+    # For counting models this is the summed observed count across categories.
+    if card.is_counting and card.observations:
+        fit_model.data = float(sum(card.observations.values()))
+    elif card.is_counting and card.observation_count is not None:
         fit_model.data = card.observation_count
 
     output_path = os.path.abspath(output_file)

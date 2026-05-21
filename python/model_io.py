@@ -25,30 +25,73 @@ def _serialize_card(card, card_dir: Optional[str]) -> Dict[str, Any]:
     if card_dir is None:
         return payload
 
-    resolved = {}
-    for target, shape_file in payload["shape_files"].items():
-        if os.path.isabs(shape_file):
-            resolved[target] = shape_file
+    resolved_specs = []
+    for shape_spec in payload.get("shape_specs", []):
+        shape_file = shape_spec["file"]
+        if not os.path.isabs(shape_file):
+            shape_file = os.path.abspath(os.path.join(card_dir, shape_file))
+        resolved_specs.append(
+            {
+                "process": shape_spec["process"],
+                "channel": shape_spec["channel"],
+                "file": shape_file,
+            }
+        )
+    payload["shape_specs"] = resolved_specs
+
+    resolved_data_obs = {}
+    for channel, obs_file in payload.get("data_obs_files", {}).items():
+        if os.path.isabs(obs_file):
+            resolved_data_obs[channel] = obs_file
         else:
-            resolved[target] = os.path.abspath(os.path.join(card_dir, shape_file))
-    payload["shape_files"] = resolved
+            resolved_data_obs[channel] = os.path.abspath(os.path.join(card_dir, obs_file))
+    payload["data_obs_files"] = resolved_data_obs
     return payload
 
 
 def _deserialize_card(card_payload: Dict[str, Any]):
-    from build_model_from_text import CardSpec, UncertaintySpec
+    from build_model_from_text import CardSpec, ShapeSpec, UncertaintySpec, ConstraintSpec
+
+    shape_specs_payload = card_payload.get("shape_specs")
+    if shape_specs_payload is None:
+        # Backward compatibility with older bundles.
+        shape_specs_payload = []
+        for process, shape_file in card_payload.get("shape_files", {}).items():
+            shape_specs_payload.append({"process": process, "channel": "*", "file": shape_file})
+
+    if "rates" in card_payload and isinstance(card_payload.get("rates"), list):
+        rates = list(card_payload.get("rates", []))
+    else:
+        # Legacy bundles used dict rates keyed by process.
+        legacy_rates = dict(card_payload.get("rates", {}))
+        legacy_processes = list(card_payload.get("process_names", []))
+        rates = [legacy_rates.get(name) for name in legacy_processes]
+
+    channels = list(card_payload.get("channels", []))
+    bin_names = list(card_payload.get("bin_names", []))
+    if not channels and "category" in card_payload:
+        channels = [card_payload["category"]]
+    if not bin_names and channels:
+        bin_names = [channels[0]] * len(card_payload.get("process_names", []))
+
+    observations = dict(card_payload.get("observations", {}))
+    if not observations and card_payload.get("observation_count") is not None and channels:
+        observations[channels[0]] = float(card_payload.get("observation_count"))
 
     return CardSpec(
-        shape_files=dict(card_payload["shape_files"]),
+        shape_specs=[ShapeSpec(**item) for item in shape_specs_payload],
         is_counting=bool(card_payload.get("is_counting", False)),
-        category=card_payload["category"],
+        channels=channels,
+        bin_names=bin_names,
         process_names=list(card_payload["process_names"]),
         process_ids=list(card_payload["process_ids"]),
-        rates=dict(card_payload.get("rates", {})),
+        rates=rates,
         uncertainties=[UncertaintySpec(**item) for item in card_payload.get("uncertainties", [])],
-        data_obs_file=card_payload.get("data_obs_file"),
-        observation_category=card_payload.get("observation_category"),
+        observations=observations,
+        data_obs_files=dict(card_payload.get("data_obs_files", {})),
+        category=card_payload.get("category"),
         observation_count=card_payload.get("observation_count"),
+        param_constraints=[ConstraintSpec(**item) for item in card_payload.get("param_constraints", [])],
     )
 
 
