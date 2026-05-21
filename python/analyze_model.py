@@ -77,6 +77,15 @@ def _print_toy_summary(summary, is_observed_fit=False):
         print(f"  Yield upper limit: {summary['yield_upper_limit']:.4f}")
     if "cls_error" in summary:
         print(f"  CLs failed: {summary['cls_error']}")
+    if "feldman_cousins" in summary:
+        fc = summary["feldman_cousins"]
+        if isinstance(fc, dict):
+            if "fc_interval" in fc:
+                print(f"  Feldman-Cousins interval: {fc['fc_interval']}")
+            elif "fc_status" in fc:
+                print(f"  Feldman-Cousins: {fc['fc_status']}")
+            else:
+                print(f"  Feldman-Cousins: {fc}")
 
 
 def _save_analysis_snapshot(output_pkl, fit_model, summaries, args):
@@ -101,6 +110,7 @@ def _save_analysis_snapshot(output_pkl, fit_model, summaries, args):
             "promote_poi": args.promote_poi,
             "poi_scan_points": args.poi_scan_points,
             "poi_scan_max": args.poi_scan_max,
+            "feldman_cousins": args.feldman_cousins,
             "set_parameters": args.set_parameters,
             "freeze_parameters": args.freeze_parameters,
             "set_parameter_ranges": args.set_parameter_ranges,
@@ -159,11 +169,18 @@ def run_analysis_cli(args):
         promote_poi=args.promote_poi,
         poi_scan_points=args.poi_scan_points,
         poi_scan_max=args.poi_scan_max,
+        feldman_cousins_alpha=args.feldman_cousins,
         progress_callback=_print_toy_summary,
     )
     total_time_s = time.perf_counter() - total_start
 
     print(f"Analyzed model: {fit_model.model.name}")
+    if args.cls is not None and summaries:
+        first = summaries[0]
+        if "cls_observed" in first:
+            print(f"CLs observed upper limit (alpha={args.cls:g}): {first['cls_observed']:.4f}")
+        elif "cls_error" in first:
+            print(f"CLs failed (alpha={args.cls:g}): {first['cls_error']}")
 
     if args.plot:
         plot_summary_artifacts(

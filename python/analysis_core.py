@@ -402,6 +402,7 @@ def run_analysis(
     poi_scan_points=41,
     poi_scan_max=None,
     progress_callback=None,
+    feldman_cousins_alpha=None,
 ):
     resolved_fit_mode = _resolve_fit_mode(fit_mode, fit_model)
     is_counting = is_likely_counting_model(fit_model)
@@ -425,6 +426,112 @@ def run_analysis(
 
     if use_asimov_data and resolved_fit_mode != "binned":
         raise ValueError("--toys -1 is only supported for binned fits")
+
+    # Feldman-Cousins limit construction (run before toys loop if requested)
+    fc_summary = None
+    if feldman_cousins_alpha is not None:
+        fc_alpha = float(feldman_cousins_alpha)
+        if not (0.0 < fc_alpha < 1.0):
+            raise ValueError("Feldman-Cousins alpha must satisfy 0 < alpha < 1")
+        fc_cl = 1.0 - fc_alpha
+
+        # Feldman-Cousins construction
+        fc_scan_points = 21
+        fc_n_toys = 100  # Number of toys per POI grid point (adjust as needed)
+        poi_grid = np.linspace(0, _default_scan_max(poi_param, fit_model), fc_scan_points)
+        fc_toy_fit_results = []  # List of lists: for each POI grid point, list of fitted POIs
+        minimizer = zfit.minimize.Minuit()
+        binned_space = None
+        binned_model = None
+        resolved_fit_mode = _resolve_fit_mode(fit_mode, fit_model)
+        is_counting = is_likely_counting_model(fit_model)
+        if resolved_fit_mode == "binned":
+            binned_space = _build_binned_space(fit_model, binned_bins)
+            binned_model = fit_model.model.to_binned(binned_space)
+        # Save original parameter values
+        starting_values = _capture_parameter_values(fit_model.model)
+        for poi_val in poi_grid:
+            toy_fits = []
+            for _ in range(fc_n_toys):
+                print(f'Running FC toy {_} for poi {poi_val}')
+                _restore_parameter_values(starting_values)
+                # Set POI to grid value and fix it
+                poi_param.set_value(poi_val)
+                poi_param.floating = False
+                # Generate toy data
+                if resolved_fit_mode == "binned":
+                    data, _, _ = _build_toy_data(fit_model, resolved_fit_mode, binned_space, is_counting)
+                    loss = _build_loss(fit_model, resolved_fit_mode, binned_model, data)
+                else:
+                    data, _, _ = _build_toy_data(fit_model, resolved_fit_mode, None, is_counting)
+                    loss = _build_loss(fit_model, resolved_fit_mode, None, data)
+                # Unfix POI for fit
+                poi_param.floating = True
+                try:
+                    result = minimizer.minimize(loss)
+                    fit_val = float(poi_param.value())
+                except Exception:
+                    fit_val = np.nan
+                toy_fits.append(fit_val)
+            fc_toy_fit_results.append(toy_fits)
+        # Now fit observed (or fallback) data
+        _restore_parameter_values(starting_values)
+        poi_param.floating = True
+        if resolved_fit_mode == "binned":
+            if hasattr(fit_model, "data") and fit_model.data is not None:
+                edges = _binning_edges_as_float_array(binned_space.binning)
+                if hasattr(fit_model.data, "value"):
+                    observed_values = np.asarray(fit_model.data.value(), dtype=float).reshape(-1)
+                    counts, _ = np.histogram(observed_values, bins=edges)
+                    if hasattr(fit_model.data, "to_binned"):
+                        data = fit_model.data.to_binned(binned_space)
+                    else:
+                        data = zfit.data.BinnedData.from_tensor(space=binned_space, values=counts.astype(float))
+                else:
+                    observed_count = float(fit_model.data)
+                    counts = np.array([observed_count], dtype=float)
+                    data = zfit.data.BinnedData.from_tensor(space=binned_space, values=counts)
+            elif use_asimov_data:
+                data, _, _ = _build_asimov_binned_data(binned_model, binned_space)
+            else:
+                data, _, _ = _build_toy_data(fit_model, resolved_fit_mode, binned_space, is_counting)
+            loss = _build_loss(fit_model, resolved_fit_mode, binned_model, data)
+        else:
+            if hasattr(fit_model, "data") and fit_model.data is not None:
+                data = fit_model.data
+            else:
+                data, _, _ = _build_toy_data(fit_model, resolved_fit_mode, None, is_counting)
+            loss = _build_loss(fit_model, resolved_fit_mode, None, data)
+        try:
+            result = minimizer.minimize(loss)
+            observed_poi = float(poi_param.value())
+        except Exception:
+            observed_poi = np.nan
+        # For each POI grid point, build acceptance interval at CL = 1 - alpha
+        fc_intervals = []
+        for toy_fits in fc_toy_fit_results:
+            toy_fits = np.array(toy_fits)
+            if np.all(np.isnan(toy_fits)):
+                fc_intervals.append((np.nan, np.nan))
+                continue
+            lower = np.nanpercentile(toy_fits, (fc_alpha / 2.0) * 100.0)
+            upper = np.nanpercentile(toy_fits, (1.0 - fc_alpha / 2.0) * 100.0)
+            fc_intervals.append((lower, upper))
+        # Find POI values where observed_poi is within acceptance interval
+        fc_in_interval = [poi for poi, (lo, hi) in zip(poi_grid, fc_intervals) if lo <= observed_poi <= hi]
+        if fc_in_interval:
+            fc_interval = (min(fc_in_interval), max(fc_in_interval))
+        else:
+            fc_interval = (np.nan, np.nan)
+        fc_summary = {
+            "fc_interval": fc_interval,
+            "fc_grid": poi_grid.tolist(),
+            "fc_intervals": fc_intervals,
+            "observed_poi": observed_poi,
+            "fc_alpha": fc_alpha,
+            "fc_confidence_level": fc_cl,
+            "fc_status": "ok" if not np.isnan(fc_interval[0]) else "no interval found"
+        }
 
     for toy_index in range(toys):
         toy_start = time.perf_counter()
@@ -560,4 +667,8 @@ def run_analysis(
         if progress_callback is not None:
             progress_callback(summary)
 
+    # Attach Feldman-Cousins result if computed
+    if feldman_cousins_alpha is not None:
+        for summary in summaries:
+            summary["feldman_cousins"] = fc_summary
     return summaries

@@ -11,6 +11,13 @@ if str(REPO_PARENT) not in sys.path:
 
 
 def _add_analyze_arguments(parser):
+    parser.add_argument(
+        "--feldman-cousins",
+        type=float,
+        default=None,
+        metavar="ALPHA",
+        help="If set, compute Feldman-Cousins confidence intervals using this alpha value (e.g. 0.1 for 90%% CL)",
+    )
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--model-file", help="Path to a saved model file (default format: .pkl)")
     source.add_argument("--input-card", help="Path to a text model card")
