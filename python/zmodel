@@ -12,15 +12,15 @@ if str(REPO_PARENT) not in sys.path:
 
 def _add_analyze_arguments(parser):
     parser.add_argument(
-        "--feldman-cousins",
+        "--feldman-cousins", "-fc",
         type=float,
         default=None,
         metavar="ALPHA",
         help="If set, compute Feldman-Cousins confidence intervals using this alpha value (e.g. 0.1 for 90%% CL)",
     )
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--model-file", help="Path to a saved model file (default format: .pkl)")
-    source.add_argument("--input-card", help="Path to a text model card")
+    source.add_argument("--model-file", "-f", type=str, help="Path to a saved model file (default format: .pkl)")
+    source.add_argument("--input-card", "-c", type=str, help="Path to a text model card")
     parser.add_argument(
         "--toys",
         type=int,
@@ -63,13 +63,13 @@ def _add_analyze_arguments(parser):
         "--checkpoint-freq",
         type=int,
         default=None,
-        help="Save checkpoint every N toys for progress tracking and recovery (default: no checkpoints)",
+        help="Save checkpoint every N datasets for progress tracking and recovery (default: no checkpoints)",
     )
     parser.add_argument(
         "--resume-from",
         type=str,
         default=None,
-        help="Resume toy generation from a previous checkpoint file (loads toys, continues from toy N+1)",
+        help="Resume analysis from a previous checkpoint file (loads completed datasets and continues from index N+1)",
     )
     parser.add_argument(
         "--profile-scan",

@@ -135,6 +135,25 @@ def _save_analysis_snapshot(output_pkl, fit_model, summaries, args):
     return output_path
 
 
+def _current_data_mode(use_observed_data, use_asimov_data):
+    if use_observed_data:
+        return "observed"
+    if use_asimov_data:
+        return "asimov"
+    return "toy"
+
+
+def _checkpoint_mismatches(checkpoint, expected):
+    mismatches = []
+    for key, expected_value in expected.items():
+        if key not in checkpoint:
+            mismatches.append((key, "<missing>", expected_value))
+            continue
+        if checkpoint.get(key) != expected_value:
+            mismatches.append((key, checkpoint.get(key), expected_value))
+    return mismatches
+
+
 
 def run_analysis_cli(args):
     fit_model = _load_analysis_model(model_file=args.model_file, input_card=args.input_card)
@@ -167,22 +186,49 @@ def run_analysis_cli(args):
     total_start = time.perf_counter()
 
     # Load checkpoint if resuming
-    existing_summaries = []
-    resume_from_toy = 0
+    existing_results = []
+    resume_from_index = 0
     if args.resume_from:
         try:
             with open(args.resume_from, "rb") as f:
                 checkpoint = dill.load(f)
-                existing_summaries = checkpoint.get("summaries", [])
-                resume_from_toy = len(existing_summaries)
-                print(f"Resumed from checkpoint: {len(existing_summaries)} toys already completed")
-                if resume_from_toy >= n_toys:
-                    print(f"Already completed all {n_toys} toys. Skipping analysis.")
-                    summaries = existing_summaries
+                expected_checkpoint_config = {
+                    "data_mode": _current_data_mode(use_observed_data, use_asimov_data),
+                    "fit_mode": args.fit_mode,
+                    "cls_alpha": args.cls,
+                    "signal_strength": args.signal_strength,
+                    "scan_max": args.scan_max,
+                    "cls_smart_scan": bool(args.cls_smart_scan),
+                    "profile_scan": bool(args.profile_scan),
+                    "poi_name": args.poi_name,
+                    "poi_scan_points": int(args.poi_scan_points),
+                    "poi_scan_max": args.poi_scan_max,
+                    "feldman_cousins_alpha": args.feldman_cousins,
+                    "compute_nll_scan": bool(args.plot),
+                }
+                mismatches = _checkpoint_mismatches(checkpoint, expected_checkpoint_config)
+                if mismatches:
+                    mismatch_text = ", ".join(
+                        [f"{k}: checkpoint={old!r}, current={new!r}" for k, old, new in mismatches]
+                    )
+                    raise ValueError(
+                        "Checkpoint is incompatible with current analysis settings: "
+                        f"{mismatch_text}"
+                    )
+
+                existing_results = checkpoint.get("summaries", [])
+                resume_from_index = len(existing_results)
+                if _current_data_mode(use_observed_data, use_asimov_data) == "toy":
+                    print(f"Resumed from checkpoint: {len(existing_results)} toys already completed")
+                else:
+                    print(f"Resumed from checkpoint: {len(existing_results)} datasets already completed")
+                if resume_from_index >= n_toys:
+                    print(f"Already completed all {n_toys} datasets. Skipping analysis.")
+                    summaries = existing_results
         except Exception as e:
             print(f"Warning: could not load checkpoint {args.resume_from}: {e}")
 
-    if not hasattr(args, "resume_from") or not args.resume_from or resume_from_toy < n_toys:
+    if not hasattr(args, "resume_from") or not args.resume_from or resume_from_index < n_toys:
         summaries = run_analysis(
             fit_model,
             toys=n_toys,
@@ -204,8 +250,8 @@ def run_analysis_cli(args):
             progress_callback=_print_toy_summary,
             checkpoint_freq=args.checkpoint_freq,
             checkpoint_path=args.output_pkl + ".checkpoint" if args.checkpoint_freq else None,
-            existing_summaries=existing_summaries,
-            resume_from_toy=resume_from_toy,
+            existing_results=existing_results,
+            resume_from_index=resume_from_index,
             compute_nll_scan=args.plot,
         )
         total_time_s = time.perf_counter() - total_start

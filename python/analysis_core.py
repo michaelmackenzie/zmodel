@@ -983,8 +983,8 @@ def run_analysis(
     feldman_cousins_alpha=None,
     checkpoint_freq=None,  # Frequency of checkpointing
     checkpoint_path=None,   # Path to save checkpoints
-    existing_summaries=None, # Existing summaries to resume from
-    resume_from_toy=0,      # Toy index to resume from
+    existing_results=None,
+    resume_from_index=0,
     compute_nll_scan=False,
 ):
     resolved_fit_mode = _resolve_fit_mode(fit_mode, fit_model)
@@ -999,7 +999,7 @@ def run_analysis(
         raise ValueError("Could not identify a parameter of interest")
 
     starting_values = _capture_parameter_values(fit_model.model)
-    summaries = list(existing_summaries) if existing_summaries else []
+    summaries = list(existing_results) if existing_results else []
     minimizer = zfit.minimize.Minuit()
     binned_space = None
     binned_model = None
@@ -1010,14 +1010,15 @@ def run_analysis(
     if use_asimov_data and resolved_fit_mode != "binned":
         raise ValueError("--toys -1 is only supported for binned fits")
 
-    if existing_summaries is None:
-        existing_summaries = []
     if checkpoint_freq is not None and checkpoint_freq < 1:
         raise ValueError("checkpoint_freq must be >= 1")
 
     data_mode = _resolve_data_mode(use_observed_data, use_asimov_data)
+    resume_index = int(resume_from_index)
+    if resume_index < 0:
+        raise ValueError("resume_from_index must be >= 0")
 
-    for sample_index in range(resume_from_toy, toys):
+    for sample_index in range(resume_index, toys):
         summary = _run_single(
             fit_model=fit_model,
             sample_index=sample_index,
@@ -1047,12 +1048,25 @@ def run_analysis(
             progress_callback(summary)
 
         # Save checkpoint if requested
-        if checkpoint_freq is not None and (sample_index - resume_from_toy + 1) % checkpoint_freq == 0 and checkpoint_path is not None:
+        if checkpoint_freq is not None and (sample_index - resume_index + 1) % checkpoint_freq == 0 and checkpoint_path is not None:
             try:
                 checkpoint_data = {
                     "summaries": summaries,
-                    "toys_completed": len(summaries),
-                    "total_toys": toys,
+                    "completed_datasets": len(summaries),
+                    "total_datasets": toys,
+                    "data_mode": data_mode,
+                    "fit_mode": resolved_fit_mode,
+                    "cls_alpha": cls_alpha,
+                    "signal_strength": signal_strength,
+                    "scan_max": scan_max,
+                    "cls_scan_points": cls_points,
+                    "cls_smart_scan": bool(cls_smart_scan),
+                    "profile_scan": bool(profile_scan),
+                    "poi_name": poi_param.name,
+                    "poi_scan_points": int(poi_scan_points),
+                    "poi_scan_max": poi_scan_max,
+                    "feldman_cousins_alpha": feldman_cousins_alpha,
+                    "compute_nll_scan": bool(compute_nll_scan),
                 }
                 with open(checkpoint_path, "wb") as f:
                     dill.dump(checkpoint_data, f)
