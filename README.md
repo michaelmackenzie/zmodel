@@ -17,7 +17,7 @@ These inputs are combined into a total model workspace that is used for analysis
 Clone the repository and install dependencies in your own Python environment:
 
 ```bash
-git clone https://github.com/michaelmackenzie/zfit_modeling.git zmodel
+git clone https://github.com/michaelmackenzie/zmodel.git zmodel
 PATH="${PATH}:${PWD}/zmodel/bin"
 PYTHONPATH="${PYTHONPATH}:${PWD}"
 
