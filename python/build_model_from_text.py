@@ -20,6 +20,13 @@ class UncertaintySpec:
 
 
 @dataclass
+class ConstraintSpec:
+    name: str
+    mean: float
+    width: float
+
+
+@dataclass
 class CardSpec:
     shape_files: Dict[str, str]
     is_counting: bool
@@ -31,6 +38,11 @@ class CardSpec:
     data_obs_file: Optional[str] = None
     observation_category: Optional[str] = None
     observation_count: Optional[float] = None
+    param_constraints: List[ConstraintSpec] = None
+
+    def __post_init__(self):
+        if self.param_constraints is None:
+            self.param_constraints = []
 
 
 def _tokenize_card_line(line: str) -> List[str]:
@@ -54,6 +66,7 @@ def parse_model_card(card_path: str) -> CardSpec:
     process_ids: Optional[List[int]] = None
     rates: Dict[str, float] = {}
     uncertainties: List[UncertaintySpec] = []
+    param_constraints: List[ConstraintSpec] = []
     process_line_count = 0
     data_obs_file: Optional[str] = None
     observation_category: Optional[str] = None
@@ -123,6 +136,15 @@ def parse_model_card(card_path: str) -> CardSpec:
             observation_count = float(fields[2])
             continue
 
+        if len(fields) >= 4 and fields[1].lower() == "param":
+            try:
+                mean = float(fields[2])
+                width = float(fields[3])
+            except ValueError:
+                raise ValueError(f"Invalid param constraint line: {' '.join(fields)}. Expected '<name> param <mean> <width>'")
+            param_constraints.append(ConstraintSpec(name=fields[0], mean=mean, width=width))
+            continue
+
         if len(fields) < 3:
             raise ValueError(f"Invalid uncertainty line: {' '.join(fields)}")
 
@@ -162,6 +184,7 @@ def parse_model_card(card_path: str) -> CardSpec:
         data_obs_file=data_obs_file,
         observation_category=observation_category,
         observation_count=observation_count,
+        param_constraints=param_constraints,
     )
 
 
@@ -545,6 +568,24 @@ def build_model_from_card(card: CardSpec, card_dir: str):
         for process in card.process_names
     }
     model = zfit.pdf.SumPDF(list(extended_pdfs.values()), name=f"model_{card.category}")
+
+    # Apply explicit parameter Gaussian constraints from 'param' card lines.
+    # Collect all named parameters from the model for lookup.
+    all_params = {p.name: p for p in model.get_params(floating=None)}
+    for cs in card.param_constraints:
+        param = all_params.get(cs.name)
+        if param is None:
+            raise ValueError(
+                f"param constraint references unknown parameter '{cs.name}'. "
+                f"Available: {sorted(all_params.keys())}"
+            )
+        constraints.append(
+            zfit.constraint.GaussianConstraint(
+                params=param,
+                observation=cs.mean,
+                uncertainty=cs.width,
+            )
+        )
 
     signal_name = next((name for name in card.process_names if process_id_map[name] < 0), None)
     signal_nominal_yield = nominal_rates.get(signal_name) if signal_name is not None else None
