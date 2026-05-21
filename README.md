@@ -61,7 +61,10 @@ Run an analysis. If the saved model contains observed data, `analyze` fits that 
 ./bin/zmodel analyze --model-file model.pkl
 ./bin/zmodel analyze --model-file model.pkl --toys 10 --fit-mode auto --plot
 ./bin/zmodel analyze --model-file model.pkl --toys -1
+./bin/zmodel analyze --model-file model.pkl --toys 50 --feldman-cousins 0.1 --fc-scan-points 31 --fc-toys 300 --fc-scan-max 5.0
 ```
+
+Each analysis run now also writes an ensemble evaluation report in JSON format. By default the file is derived from `--output-pkl`, for example `analysis_output_ensemble_report.json`. Use `--report-file` to choose a custom path.
 
 Generate plots from a saved analysis snapshot:
 

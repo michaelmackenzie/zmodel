@@ -1,4 +1,5 @@
 import dill
+import json
 import os
 import time
 
@@ -123,6 +124,10 @@ def _save_analysis_snapshot(output_pkl, fit_model, summaries, args):
             "poi_scan_points": args.poi_scan_points,
             "poi_scan_max": args.poi_scan_max,
             "feldman_cousins": args.feldman_cousins,
+            "feldman_cousins_scan_points": args.fc_scan_points,
+            "feldman_cousins_n_toys": args.fc_toys,
+            "feldman_cousins_scan_max": args.fc_scan_max,
+            "report_file": args.report_file,
             "set_parameters": args.set_parameters,
             "freeze_parameters": args.freeze_parameters,
             "set_parameter_ranges": args.set_parameter_ranges,
@@ -152,6 +157,139 @@ def _checkpoint_mismatches(checkpoint, expected):
         if checkpoint.get(key) != expected_value:
             mismatches.append((key, checkpoint.get(key), expected_value))
     return mismatches
+
+
+def _distribution_summary(values):
+    arr = np.asarray(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return None
+
+    return {
+        "count": int(arr.size),
+        "mean": float(np.mean(arr)),
+        "std": float(np.std(arr)),
+        "median": float(np.median(arr)),
+        "min": float(np.min(arr)),
+        "max": float(np.max(arr)),
+        "p16": float(np.percentile(arr, 16)),
+        "p84": float(np.percentile(arr, 84)),
+    }
+
+
+def _build_ensemble_evaluation_report(summaries, total_time_s):
+    report = {
+        "n_datasets": int(len(summaries)),
+        "runtime": {
+            "total_time_s": float(total_time_s),
+            "average_time_s": float(total_time_s / len(summaries)) if summaries else None,
+        },
+    }
+
+    if not summaries:
+        return report
+
+    valid_flags = [bool(summary.get("valid", False)) for summary in summaries]
+    n_valid = int(sum(valid_flags))
+    report["fit_quality"] = {
+        "n_valid": n_valid,
+        "n_invalid": int(len(summaries) - n_valid),
+        "valid_fraction": float(n_valid / len(summaries)),
+        "invalid_fraction": float((len(summaries) - n_valid) / len(summaries)),
+    }
+
+    report["poi_name"] = summaries[0].get("poi_name", "poi")
+
+    poi_fits = [summary.get("poi_fit") for summary in summaries]
+    poi_unc = [summary.get("poi_unc_hesse") for summary in summaries]
+    poi_pulls = [summary.get("poi_pull") for summary in summaries]
+    report["poi_fit"] = _distribution_summary(poi_fits)
+    report["poi_unc_hesse"] = _distribution_summary(poi_unc)
+    report["poi_pull"] = _distribution_summary(poi_pulls)
+
+    coverage_values = []
+    for summary in summaries:
+        truth = summary.get("poi_true")
+        fit = summary.get("poi_fit")
+        unc = summary.get("poi_unc_hesse")
+        if truth is None or fit is None or unc is None:
+            continue
+        truth = float(truth)
+        fit = float(fit)
+        unc = float(unc)
+        if not (np.isfinite(truth) and np.isfinite(fit) and np.isfinite(unc) and unc > 0.0):
+            continue
+        coverage_values.append((truth, fit, unc))
+
+    if coverage_values:
+        within_1sigma = 0
+        within_95pct = 0
+        for truth, fit, unc in coverage_values:
+            if abs(fit - truth) <= unc:
+                within_1sigma += 1
+            if abs(fit - truth) <= 1.96 * unc:
+                within_95pct += 1
+        n_cov = len(coverage_values)
+        report["coverage"] = {
+            "n": int(n_cov),
+            "within_1sigma": float(within_1sigma / n_cov),
+            "within_95pct": float(within_95pct / n_cov),
+        }
+
+    cls_obs = [summary.get("cls_observed") for summary in summaries if "cls_observed" in summary]
+    cls_yield = [summary.get("yield_upper_limit") for summary in summaries if "yield_upper_limit" in summary]
+    cls_failures = [summary for summary in summaries if "cls_error" in summary]
+    if cls_obs or cls_yield or cls_failures:
+        report["cls"] = {
+            "observed_limit": _distribution_summary(cls_obs),
+            "yield_upper_limit": _distribution_summary(cls_yield),
+            "n_failures": int(len(cls_failures)),
+            "failure_fraction": float(len(cls_failures) / len(summaries)),
+        }
+
+    fc_entries = [summary.get("feldman_cousins") for summary in summaries if "feldman_cousins" in summary]
+    if fc_entries:
+        fc_ok = 0
+        fc_fail = 0
+        fc_widths = []
+        for entry in fc_entries:
+            if not isinstance(entry, dict):
+                fc_fail += 1
+                continue
+            status = str(entry.get("fc_status", "")).lower()
+            if "ok" in status:
+                fc_ok += 1
+            else:
+                fc_fail += 1
+            interval = entry.get("fc_interval")
+            if isinstance(interval, (list, tuple)) and len(interval) == 2:
+                low, high = interval
+                if low is not None and high is not None:
+                    low = float(low)
+                    high = float(high)
+                    if np.isfinite(low) and np.isfinite(high):
+                        fc_widths.append(high - low)
+
+        report["feldman_cousins"] = {
+            "n_evaluated": int(len(fc_entries)),
+            "n_ok": int(fc_ok),
+            "n_non_ok": int(fc_fail),
+            "width": _distribution_summary(fc_widths),
+        }
+
+    return report
+
+
+def _save_ensemble_report(report, output_pkl, report_file=None):
+    if report_file:
+        output_path = os.path.abspath(report_file)
+    else:
+        base, _ = os.path.splitext(os.path.abspath(output_pkl))
+        output_path = f"{base}_ensemble_report.json"
+
+    with open(output_path, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2, sort_keys=True)
+    return output_path
 
 
 
@@ -204,6 +342,9 @@ def run_analysis_cli(args):
                     "poi_scan_points": int(args.poi_scan_points),
                     "poi_scan_max": args.poi_scan_max,
                     "feldman_cousins_alpha": args.feldman_cousins,
+                    "feldman_cousins_scan_points": int(args.fc_scan_points),
+                    "feldman_cousins_n_toys": int(args.fc_toys),
+                    "feldman_cousins_scan_max": args.fc_scan_max,
                     "compute_nll_scan": bool(args.plot),
                 }
                 mismatches = _checkpoint_mismatches(checkpoint, expected_checkpoint_config)
@@ -247,6 +388,9 @@ def run_analysis_cli(args):
             poi_scan_points=args.poi_scan_points,
             poi_scan_max=args.poi_scan_max,
             feldman_cousins_alpha=args.feldman_cousins,
+            feldman_cousins_scan_points=args.fc_scan_points,
+            feldman_cousins_n_toys=args.fc_toys,
+            feldman_cousins_scan_max=args.fc_scan_max,
             progress_callback=_print_toy_summary,
             checkpoint_freq=args.checkpoint_freq,
             checkpoint_path=args.output_pkl + ".checkpoint" if args.checkpoint_freq else None,
@@ -286,8 +430,18 @@ def run_analysis_cli(args):
         print(f"Average time per toy: {total_time_s / len(summaries):.4f}s")
     print(f"Total execution time: {total_time_s:.4f}s")
 
-    output_pkl=args.output_pkl
-    if output_pkl is None: output_pkl = f'analysis_output_{args.seed}.pkl'
+    output_pkl = args.output_pkl
+    if output_pkl is None:
+        output_pkl = f"analysis_output_{args.seed}.pkl"
+
+    ensemble_report = _build_ensemble_evaluation_report(summaries=summaries, total_time_s=total_time_s)
+    report_path = _save_ensemble_report(
+        report=ensemble_report,
+        output_pkl=output_pkl,
+        report_file=args.report_file,
+    )
+    print(f"Saved ensemble evaluation report to: {report_path}")
+
     snapshot_path = _save_analysis_snapshot(
         output_pkl=output_pkl,
         fit_model=fit_model,

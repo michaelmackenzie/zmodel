@@ -770,15 +770,27 @@ def _compute_feldman_cousins_for_toy(
     poi_param,
     loss,
     feldman_cousins_alpha,
+    fc_scan_points=21,
+    fc_n_toys=100,
+    fc_scan_max=None,
 ):
     fc_alpha = float(feldman_cousins_alpha)
     if not (0.0 < fc_alpha < 1.0):
         raise ValueError("Feldman-Cousins alpha must satisfy 0 < alpha < 1")
     fc_cl = 1.0 - fc_alpha
 
-    fc_scan_points = 21
-    fc_n_toys = 100
-    poi_grid = np.linspace(0, _default_scan_max(poi_param, fit_model), fc_scan_points)
+    fc_scan_points = int(fc_scan_points)
+    fc_n_toys = int(fc_n_toys)
+    if fc_scan_points < 3:
+        raise ValueError("Feldman-Cousins scan requires at least 3 POI grid points")
+    if fc_n_toys < 1:
+        raise ValueError("Feldman-Cousins requires at least 1 toy per POI point")
+
+    grid_max = float(fc_scan_max) if fc_scan_max is not None else _default_scan_max(poi_param, fit_model)
+    if not np.isfinite(grid_max) or grid_max <= 0.0:
+        raise ValueError("Feldman-Cousins scan max must be finite and > 0")
+
+    poi_grid = np.linspace(0.0, grid_max, fc_scan_points)
     fc_toy_fit_results = []
 
     minimizer = zfit.minimize.Minuit()
@@ -841,6 +853,9 @@ def _compute_feldman_cousins_for_toy(
             "observed_poi": observed_poi,
             "fc_alpha": fc_alpha,
             "fc_confidence_level": fc_cl,
+            "fc_scan_points": int(fc_scan_points),
+            "fc_n_toys": int(fc_n_toys),
+            "fc_scan_max": float(grid_max),
             "fc_status": "ok" if not np.isnan(fc_interval[0]) else "no interval found",
         }
     finally:
@@ -869,6 +884,9 @@ def _run_single(
     cls_points,
     cls_smart_scan,
     feldman_cousins_alpha,
+    feldman_cousins_scan_points,
+    feldman_cousins_n_toys,
+    feldman_cousins_scan_max,
     compute_nll_scan,
 ):
     start_time = time.perf_counter()
@@ -930,6 +948,8 @@ def _run_single(
         summary["poi_pull"] = (summary["poi_fit"] - float(poi_true)) / poi_unc
     else:
         summary["poi_pull"] = None
+    if poi_true is not None and np.isfinite(float(poi_true)):
+        summary["poi_true"] = float(poi_true)
 
     if cls_alpha is not None:
         _apply_cls_to_summary(
@@ -955,6 +975,9 @@ def _run_single(
                 poi_param=poi_param,
                 loss=loss,
                 feldman_cousins_alpha=feldman_cousins_alpha,
+                fc_scan_points=feldman_cousins_scan_points,
+                fc_n_toys=feldman_cousins_n_toys,
+                fc_scan_max=feldman_cousins_scan_max,
             )
         except Exception as exc:
             summary["feldman_cousins"] = {"fc_status": f"failed: {exc}"}
@@ -981,6 +1004,9 @@ def run_analysis(
     poi_scan_max=None,
     progress_callback=None,
     feldman_cousins_alpha=None,
+    feldman_cousins_scan_points=21,
+    feldman_cousins_n_toys=100,
+    feldman_cousins_scan_max=None,
     checkpoint_freq=None,  # Frequency of checkpointing
     checkpoint_path=None,   # Path to save checkpoints
     existing_results=None,
@@ -1040,6 +1066,9 @@ def run_analysis(
             cls_points=cls_points,
             cls_smart_scan=cls_smart_scan,
             feldman_cousins_alpha=feldman_cousins_alpha,
+            feldman_cousins_scan_points=feldman_cousins_scan_points,
+            feldman_cousins_n_toys=feldman_cousins_n_toys,
+            feldman_cousins_scan_max=feldman_cousins_scan_max,
             compute_nll_scan=(sample_index == 0 and compute_nll_scan),
         )
 
@@ -1066,6 +1095,9 @@ def run_analysis(
                     "poi_scan_points": int(poi_scan_points),
                     "poi_scan_max": poi_scan_max,
                     "feldman_cousins_alpha": feldman_cousins_alpha,
+                    "feldman_cousins_scan_points": int(feldman_cousins_scan_points),
+                    "feldman_cousins_n_toys": int(feldman_cousins_n_toys),
+                    "feldman_cousins_scan_max": feldman_cousins_scan_max,
                     "compute_nll_scan": bool(compute_nll_scan),
                 }
                 with open(checkpoint_path, "wb") as f:

@@ -18,6 +18,24 @@ def _add_analyze_arguments(parser):
         metavar="ALPHA",
         help="If set, compute Feldman-Cousins confidence intervals using this alpha value (e.g. 0.1 for 90%% CL)",
     )
+    parser.add_argument(
+        "--fc-scan-points",
+        type=int,
+        default=21,
+        help="Number of POI grid points for Feldman-Cousins construction",
+    )
+    parser.add_argument(
+        "--fc-toys",
+        type=int,
+        default=100,
+        help="Number of toys per POI grid point for Feldman-Cousins construction",
+    )
+    parser.add_argument(
+        "--fc-scan-max",
+        type=float,
+        default=None,
+        help="Optional POI scan maximum for Feldman-Cousins (default: automatic)",
+    )
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--model-file", "-f", type=str, help="Path to a saved model file (default format: .pkl)")
     source.add_argument("--input-card", "-c", type=str, help="Path to a text model card")
@@ -132,6 +150,12 @@ def _add_analyze_arguments(parser):
         type=str,
         default="analysis_output.pkl",
         help="Output pickle file containing the fitted model, input data, and toy summaries",
+    )
+    parser.add_argument(
+        "--report-file",
+        type=str,
+        default=None,
+        help="Optional JSON file path for ensemble evaluation report (default: derived from --output-pkl)",
     )
     parser.add_argument(
         "--seed",
