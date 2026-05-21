@@ -1,8 +1,0 @@
-#!/usr/bin/env python3
-import pathlib
-import runpy
-
-
-if __name__ == "__main__":
-    script_path = pathlib.Path(__file__).resolve().parent / "scripts" / "zmodel"
-    runpy.run_path(str(script_path), run_name="__main__")

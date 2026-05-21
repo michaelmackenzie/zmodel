@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 import zfit
 import zfit.z.numpy as znp
 
-from utilities import FitModel
+from zmodel.utilities import FitModel
 
 
 def _clip(value):

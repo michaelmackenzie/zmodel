@@ -12,11 +12,11 @@ import numpy as np
 import tensorflow as tf
 import zfit
 
-from build_model_from_text import build_model_from_card, parse_model_card
-from model_io import load_fit_model
-from analysis_core import configure_runtime, run_analysis
-from analysis_overrides import apply_parameter_overrides
-from analyze_plotting import plot_summary_artifacts
+from zmodel.build_model_from_text import build_model_from_card, parse_model_card
+from zmodel.model_io import load_fit_model
+from zmodel.analysis_core import configure_runtime, run_analysis
+from zmodel.analysis_overrides import apply_parameter_overrides
+from zmodel.analyze_plotting import plot_summary_artifacts
 
 
 # Also silence python-side TensorFlow and absl warning emitters.

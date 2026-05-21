@@ -5,8 +5,9 @@ import sys
 
 # Allow importing project modules when running from scripts/.
 REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
-if str(REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(REPO_ROOT))
+REPO_PARENT = REPO_ROOT.parent
+if str(REPO_PARENT) not in sys.path:
+    sys.path.insert(0, str(REPO_PARENT))
 
 
 def _add_analyze_arguments(parser):
@@ -144,13 +145,13 @@ def main():
 
 
     if args.command == "build":
-        from python.build_model_from_text import build_and_save_model_from_card_file
+        from zmodel.build_model_from_text import build_and_save_model_from_card_file
         output_path = build_and_save_model_from_card_file(args.input_card, args.output_file)
         print(f"Saved FitModel to {output_path}")
         return
 
     if args.command == "load":
-        from python.load_model import load_and_summarize_model
+        from zmodel.load_model import load_and_summarize_model
         summary = load_and_summarize_model(args.model_file)
         print(f"Loaded model from {summary['model_path']}")
         print(f"Model name: {summary['model_name']}")
@@ -164,7 +165,7 @@ def main():
         return
 
     if args.command == "analyze":
-        from python.analyze_model import run_analysis_cli
+        from zmodel.analyze_model import run_analysis_cli
         run_analysis_cli(args)
         return
 

@@ -3,8 +3,8 @@ import time
 import zfit
 from scipy.optimize import minimize_scalar
 
-from analysis_overrides import find_parameter_by_name
-from utilities import AsymptoticCalculator, POI, POIarray, UpperLimit
+from zmodel.analysis_overrides import find_parameter_by_name
+from zmodel.utilities import AsymptoticCalculator, POI, POIarray, UpperLimit
 
 
 def is_likely_counting_model(fit_model):

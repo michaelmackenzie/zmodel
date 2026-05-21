@@ -8,9 +8,9 @@ import numpy as np
 import zfit
 import zfit.z.numpy as znp
 
-from model_io import save_fit_model_bundle
-from utilities import FitModel
-from functions import *
+from zmodel.model_io import save_fit_model_bundle
+from zmodel.utilities import FitModel
+from zmodel.functions import *
 
 @dataclass
 class UncertaintySpec:

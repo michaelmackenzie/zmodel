@@ -1,6 +1,6 @@
 import os
 
-from model_io import load_fit_model
+from zmodel.model_io import load_fit_model
 
 
 def load_and_summarize_model(model_file: str):
