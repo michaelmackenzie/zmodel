@@ -153,26 +153,54 @@ def run_analysis_cli(args):
 
     configure_runtime(args.graph_mode, fit_model, n_toys)
     total_start = time.perf_counter()
-    summaries = run_analysis(
-        fit_model,
-        toys=n_toys,
-        use_observed_data=use_observed_data,
-        use_asimov_data=use_asimov_data,
-        cls_alpha=args.cls,
-        signal_strength=args.signal_strength,
-        scan_max=args.scan_max,
-        fit_mode=args.fit_mode,
-        binned_bins=args.binned_bins,
-        cls_scan_points=args.cls_scan_points,
-        profile_scan=args.profile_scan,
-        poi_name=args.poi_name,
-        promote_poi=args.promote_poi,
-        poi_scan_points=args.poi_scan_points,
-        poi_scan_max=args.poi_scan_max,
-        feldman_cousins_alpha=args.feldman_cousins,
-        progress_callback=_print_toy_summary,
-    )
-    total_time_s = time.perf_counter() - total_start
+    # Store plot intent in global for gating NLL scan inside run_analysis
+    # (workaround pending import/signature debugging)
+    import zmodel.analysis_core as analysis_core_module
+    analysis_core_module._SHOULD_COMPUTE_NLL_SCAN = args.plot
+
+    # Load checkpoint if resuming
+    existing_summaries = []
+    resume_from_toy = 0
+    if args.resume_from:
+        try:
+            with open(args.resume_from, "rb") as f:
+                checkpoint = dill.load(f)
+                existing_summaries = checkpoint.get("summaries", [])
+                resume_from_toy = len(existing_summaries)
+                print(f"Resumed from checkpoint: {len(existing_summaries)} toys already completed")
+                if resume_from_toy >= n_toys:
+                    print(f"Already completed all {n_toys} toys. Skipping analysis.")
+                    summaries = existing_summaries
+        except Exception as e:
+            print(f"Warning: could not load checkpoint {args.resume_from}: {e}")
+
+    if not hasattr(args, "resume_from") or not args.resume_from or resume_from_toy < n_toys:
+        summaries = run_analysis(
+            fit_model,
+            toys=n_toys,
+            use_observed_data=use_observed_data,
+            use_asimov_data=use_asimov_data,
+            cls_alpha=args.cls,
+            signal_strength=args.signal_strength,
+            scan_max=args.scan_max,
+            fit_mode=args.fit_mode,
+            binned_bins=args.binned_bins,
+            cls_scan_points=args.cls_scan_points,
+            profile_scan=args.profile_scan,
+            poi_name=args.poi_name,
+            promote_poi=args.promote_poi,
+            poi_scan_points=args.poi_scan_points,
+            poi_scan_max=args.poi_scan_max,
+            feldman_cousins_alpha=args.feldman_cousins,
+            progress_callback=_print_toy_summary,
+            checkpoint_freq=args.checkpoint_freq,
+            checkpoint_path=args.output_pkl + ".checkpoint" if args.checkpoint_freq else None,
+            existing_summaries=existing_summaries,
+            resume_from_toy=resume_from_toy,
+        )
+        total_time_s = time.perf_counter() - total_start
+    else:
+        total_time_s = 0
 
     print(f"Analyzed model: {fit_model.model.name}")
     if args.cls is not None and summaries:

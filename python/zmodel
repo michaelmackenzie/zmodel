@@ -55,6 +55,18 @@ def _add_analyze_arguments(parser):
         help="TensorFlow graph mode: on (default), auto, or off",
     )
     parser.add_argument(
+        "--checkpoint-freq",
+        type=int,
+        default=None,
+        help="Save checkpoint every N toys for progress tracking and recovery (default: no checkpoints)",
+    )
+    parser.add_argument(
+        "--resume-from",
+        type=str,
+        default=None,
+        help="Resume toy generation from a previous checkpoint file (loads toys, continues from toy N+1)",
+    )
+    parser.add_argument(
         "--profile-scan",
         action="store_true",
         help="For counting+binned fits, run a profile-likelihood scan over the POI instead of full minimization",

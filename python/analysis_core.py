@@ -2,6 +2,7 @@ import numpy as np
 import time
 import zfit
 from scipy.optimize import minimize_scalar
+from multiprocessing import Pool
 
 from zmodel.analysis_overrides import find_parameter_by_name
 from zmodel.utilities import AsymptoticCalculator, POI, POIarray, UpperLimit
@@ -385,6 +386,9 @@ def _extract_fit_parameter_values(fit_result):
     return values
 
 
+# Global flag for gating NLL scan computation (set by analyze_model.py)
+_SHOULD_COMPUTE_NLL_SCAN = False
+
 def run_analysis(
     fit_model,
     toys,
@@ -403,6 +407,10 @@ def run_analysis(
     poi_scan_max=None,
     progress_callback=None,
     feldman_cousins_alpha=None,
+    checkpoint_freq=None,  # Frequency of checkpointing
+    checkpoint_path=None,   # Path to save checkpoints
+    existing_summaries=None, # Existing summaries to resume from
+    resume_from_toy=0,      # Toy index to resume from
 ):
     resolved_fit_mode = _resolve_fit_mode(fit_mode, fit_model)
     is_counting = is_likely_counting_model(fit_model)
@@ -416,7 +424,7 @@ def run_analysis(
         raise ValueError("Could not identify a parameter of interest")
 
     starting_values = _capture_parameter_values(fit_model.model)
-    summaries = []
+    summaries = list(existing_summaries) if existing_summaries else []
     minimizer = zfit.minimize.Minuit()
     binned_space = None
     binned_model = None
@@ -426,6 +434,12 @@ def run_analysis(
 
     if use_asimov_data and resolved_fit_mode != "binned":
         raise ValueError("--toys -1 is only supported for binned fits")
+
+    import dill
+    if existing_summaries is None:
+        existing_summaries = []
+    if checkpoint_freq is not None and checkpoint_freq < 1:
+        raise ValueError("checkpoint_freq must be >= 1")
 
     # Feldman-Cousins limit construction (run before toys loop if requested)
     fc_summary = None
@@ -453,7 +467,6 @@ def run_analysis(
         for poi_val in poi_grid:
             toy_fits = []
             for _ in range(fc_n_toys):
-                print(f'Running FC toy {_} for poi {poi_val}')
                 _restore_parameter_values(starting_values)
                 # Set POI to grid value and fix it
                 poi_param.set_value(poi_val)
@@ -533,7 +546,7 @@ def run_analysis(
             "fc_status": "ok" if not np.isnan(fc_interval[0]) else "no interval found"
         }
 
-    for toy_index in range(toys):
+    for toy_index in range(resume_from_toy, toys):
         toy_start = time.perf_counter()
         _restore_parameter_values(starting_values)
         if signal_strength is not None and signal_param is not None and hasattr(signal_param, "set_value"):
@@ -630,7 +643,7 @@ def run_analysis(
         summary["observed_fit"] = bool(use_observed_data)
         summary["asimov_fit"] = bool(use_asimov_data)
 
-        if toy_index == 0:
+        if toy_index == 0 and _SHOULD_COMPUTE_NLL_SCAN:
             nll_scan = _compute_nll_scan_for_plot(
                 loss=loss,
                 minimizer=minimizer,
@@ -666,6 +679,20 @@ def run_analysis(
         summaries.append(summary)
         if progress_callback is not None:
             progress_callback(summary)
+
+        # Save checkpoint if requested
+        if checkpoint_freq is not None and (toy_index - resume_from_toy + 1) % checkpoint_freq == 0 and checkpoint_path is not None:
+            try:
+                checkpoint_data = {
+                    "summaries": summaries,
+                    "toys_completed": len(summaries),
+                    "total_toys": toys,
+                }
+                with open(checkpoint_path, "wb") as f:
+                    dill.dump(checkpoint_data, f)
+                print(f"Checkpoint saved: {len(summaries)}/{toys} toys completed")
+            except Exception as e:
+                print(f"Warning: checkpoint save failed: {e}")
 
     # Attach Feldman-Cousins result if computed
     if feldman_cousins_alpha is not None:
