@@ -37,6 +37,11 @@ def _add_analyze_arguments(parser):
         help="Number of scan points for CLs (default: 9 for counting+binned, else 25)",
     )
     parser.add_argument(
+        "--cls-smart-scan",
+        action="store_true",
+        help="Adaptively refine the CLs scan range and granularity around the limit",
+    )
+    parser.add_argument(
         "--fit-mode",
         choices=("auto", "binned", "unbinned"),
         default="auto",

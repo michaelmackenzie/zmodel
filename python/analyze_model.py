@@ -3,7 +3,7 @@ import os
 import time
 
 # Reduce TensorFlow C++ logging noise before zfit/tensorflow import.
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
 os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 os.environ.setdefault("TF_CPP_MIN_VLOG_LEVEL", "3")
 os.environ.setdefault("AUTOGRAPH_VERBOSITY", "0")
@@ -73,6 +73,17 @@ def _print_toy_summary(summary, is_observed_fit=False):
         print(f"  CLs observed upper limit: {summary['cls_observed']:.4f}")
     if "cls_scan_points" in summary:
         print(f"  CLs scan points: {summary['cls_scan_points']}")
+    if "cls_scan_max" in summary:
+        print(f"  CLs scan max: {summary['cls_scan_max']:.4g}")
+    if "cls_expected_quantiles" in summary:
+        q = summary["cls_expected_quantiles"]
+        print(
+            "  CLs expected (asymptotic, b-only fit): "
+            f"2.5%={q['2.5%']:.4f}, 16%={q['16%']:.4f}, 50%={q['50%']:.4f}, "
+            f"84%={q['84%']:.4f}, 97.5%={q['97.5%']:.4f}"
+        )
+    if "cls_expected_error" in summary:
+        print(f"  CLs expected failed: {summary['cls_expected_error']}")
     if "yield_upper_limit" in summary:
         print(f"  Yield upper limit: {summary['yield_upper_limit']:.4f}")
     if "cls_error" in summary:
@@ -105,6 +116,7 @@ def _save_analysis_snapshot(output_pkl, fit_model, summaries, args):
             "signal_strength": args.signal_strength,
             "scan_max": args.scan_max,
             "cls_scan_points": args.cls_scan_points,
+            "cls_smart_scan": args.cls_smart_scan,
             "profile_scan": args.profile_scan,
             "poi_name": args.poi_name,
             "promote_poi": args.promote_poi,
@@ -153,10 +165,6 @@ def run_analysis_cli(args):
 
     configure_runtime(args.graph_mode, fit_model, n_toys)
     total_start = time.perf_counter()
-    # Store plot intent in global for gating NLL scan inside run_analysis
-    # (workaround pending import/signature debugging)
-    import zmodel.analysis_core as analysis_core_module
-    analysis_core_module._SHOULD_COMPUTE_NLL_SCAN = args.plot
 
     # Load checkpoint if resuming
     existing_summaries = []
@@ -186,6 +194,7 @@ def run_analysis_cli(args):
             fit_mode=args.fit_mode,
             binned_bins=args.binned_bins,
             cls_scan_points=args.cls_scan_points,
+            cls_smart_scan=args.cls_smart_scan,
             profile_scan=args.profile_scan,
             poi_name=args.poi_name,
             promote_poi=args.promote_poi,
@@ -197,6 +206,7 @@ def run_analysis_cli(args):
             checkpoint_path=args.output_pkl + ".checkpoint" if args.checkpoint_freq else None,
             existing_summaries=existing_summaries,
             resume_from_toy=resume_from_toy,
+            compute_nll_scan=args.plot,
         )
         total_time_s = time.perf_counter() - total_start
     else:
@@ -207,6 +217,13 @@ def run_analysis_cli(args):
         first = summaries[0]
         if "cls_observed" in first:
             print(f"CLs observed upper limit (alpha={args.cls:g}): {first['cls_observed']:.4f}")
+            if "cls_expected_quantiles" in first:
+                q = first["cls_expected_quantiles"]
+                print(
+                    "CLs expected (asymptotic, b-only fit): "
+                    f"2.5%={q['2.5%']:.4f}, 16%={q['16%']:.4f}, 50%={q['50%']:.4f}, "
+                    f"84%={q['84%']:.4f}, 97.5%={q['97.5%']:.4f}"
+                )
         elif "cls_error" in first:
             print(f"CLs failed (alpha={args.cls:g}): {first['cls_error']}")
 
