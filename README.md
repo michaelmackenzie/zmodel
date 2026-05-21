@@ -1,4 +1,4 @@
-# zfit Modeling
+# zmodel: zfit Modeling
 
 This package is meant to assist physics analysis using the `zfit` framework.
 Analysis models are considered to be the combination of signal/background processes with
