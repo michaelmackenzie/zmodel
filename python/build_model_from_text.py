@@ -94,7 +94,6 @@ def parse_model_card(card_path: str) -> CardSpec:
     process_line_count = 0
     observations: Dict[str, float] = {}
     data_obs_files: Dict[str, str] = {}
-    legacy_observation_count: Optional[float] = None
     comment_markers = {"#", "//", "--"}
 
     for fields in tokens:
@@ -156,9 +155,6 @@ def parse_model_card(card_path: str) -> CardSpec:
             continue
 
         if key == "observation":
-            if len(fields) == 2:
-                legacy_observation_count = float(fields[1])
-                continue
             if len(fields) != 3:
                 raise ValueError(
                     f"Invalid observation line: {' '.join(fields)}. Expected 'observation <category> <count>'"
@@ -196,11 +192,6 @@ def parse_model_card(card_path: str) -> CardSpec:
         raise ValueError("bin line length does not match process count")
 
     channels = list(dict.fromkeys(bin_names))
-
-    if legacy_observation_count is not None:
-        if len(channels) != 1:
-            raise ValueError("Single-value observation is only allowed for single-category cards")
-        observations[channels[0]] = legacy_observation_count
 
     if observations:
         unknown_obs = [name for name in observations if name not in channels]
@@ -344,6 +335,12 @@ def _coerce_unbinned_data_obs(obs_space, payload):
         values = values.reshape(-1, 1)
 
     return zfit.Data.from_numpy(obs=obs_space, array=values)
+
+
+def _space_signature(space):
+    obs = tuple(getattr(space, "obs", ()) or ())
+    limits = tuple(float(x) for x in space.limit1d)
+    return obs, limits
 
 
 def _get_from_dict_candidates(source_dict, process, candidates):
@@ -498,9 +495,10 @@ def multiply_factors(base: float, factors: List[zfit.Parameter], name: str):
 
 
 def _kind_token(kind: str) -> str:
-    lowered = kind.strip().lower()
-    if lowered == "lnn":
+    token = kind.strip()
+    if token == "lnN":
         return "lnN"
+    lowered = token.lower()
     if lowered == "gs":
         return "gs"
     if lowered == "shape":
@@ -547,24 +545,30 @@ def build_model_from_card(card: CardSpec, card_dir: str):
         if card.observations:
             observed_data = float(sum(card.observations.values()))
             observed_counts_by_channel = {k: float(v) for k, v in card.observations.items()}
-        elif card.observation_count is not None:
-            observed_data = float(card.observation_count)
     else:
         process_payloads = _resolve_shape_payloads(card, card_dir)
         for term_name, process, payload, rate in zip(term_names, card.process_names, process_payloads, card.rates):
             shapes[term_name] = get_nominal_pdf(payload, process)
             nominal_rates[term_name] = get_nominal_rate(payload, process, rate)
 
-        first_shape = shapes[term_names[0]]
-        obs_space = first_shape.space
-        obs_limits = tuple(float(x) for x in first_shape.space.limit1d)
+        channel_obs: Dict[str, zfit.Space] = {}
+        channel_obs_ranges: Dict[str, tuple] = {}
+        for term_name, channel in zip(term_names, card.bin_names):
+            term_space = shapes[term_name].space
+            term_limits = tuple(float(x) for x in term_space.limit1d)
+            if channel not in channel_obs:
+                channel_obs[channel] = term_space
+                channel_obs_ranges[channel] = term_limits
+                continue
 
-        for term_name in term_names[1:]:
-            candidate_limits = tuple(float(x) for x in shapes[term_name].space.limit1d)
-            if candidate_limits != obs_limits:
+            if _space_signature(channel_obs[channel]) != _space_signature(term_space):
                 raise ValueError(
-                    "All channels must share the same observable limits to build a combined model"
+                    f"All processes inside channel '{channel}' must share the same observable space"
                 )
+
+        first_channel = card.channels[0]
+        obs_space = channel_obs[first_channel]
+        obs_limits = channel_obs_ranges[first_channel]
 
         if card.data_obs_files:
             # The current analysis pipeline expects one observed dataset.
@@ -578,7 +582,7 @@ def build_model_from_card(card: CardSpec, card_dir: str):
                 if not os.path.isabs(obs_path):
                     obs_path = os.path.join(card_dir, obs_path)
                 obs_payload = _load_shape_payload_from_file(os.path.abspath(obs_path))
-                channel_data = _coerce_unbinned_data_obs(obs_space, _extract_data_obs_payload(obs_payload))
+                channel_data = _coerce_unbinned_data_obs(channel_obs[channel], _extract_data_obs_payload(obs_payload))
                 if channel_data is None:
                     continue
                 channel_values = np.asarray(channel_data.value(), dtype=float)
@@ -588,16 +592,39 @@ def build_model_from_card(card: CardSpec, card_dir: str):
                 merged_rows.append(channel_values)
 
             if merged_rows:
-                observed_data = zfit.Data.from_numpy(obs=obs_space, array=np.vstack(merged_rows))
+                unique_signatures = {
+                    _space_signature(channel_obs[channel])
+                    for channel in observed_values_by_channel
+                }
+                if len(unique_signatures) == 1:
+                    observed_data = zfit.Data.from_numpy(obs=obs_space, array=np.vstack(merged_rows))
+                else:
+                    observed_data = {
+                        channel: _coerce_unbinned_data_obs(
+                            channel_obs[channel],
+                            {"values": values},
+                        )
+                        for channel, values in observed_values_by_channel.items()
+                    }
 
         elif "*" in card.data_obs_files:
             obs_path = card.data_obs_files["*"]
             if not os.path.isabs(obs_path):
                 obs_path = os.path.join(card_dir, obs_path)
             obs_payload = _load_shape_payload_from_file(os.path.abspath(obs_path))
-            observed_data = _coerce_unbinned_data_obs(obs_space, _extract_data_obs_payload(obs_payload))
-            if observed_data is not None and len(card.channels) == 1:
-                observed_values_by_channel[card.channels[0]] = np.asarray(observed_data.value(), dtype=float).reshape(-1)
+            if len(card.channels) == 1:
+                observed_data = _coerce_unbinned_data_obs(obs_space, _extract_data_obs_payload(obs_payload))
+                if observed_data is not None:
+                    observed_values_by_channel[card.channels[0]] = np.asarray(observed_data.value(), dtype=float).reshape(-1)
+            else:
+                observed_data = {}
+                payload_data = _extract_data_obs_payload(obs_payload)
+                for channel in card.channels:
+                    channel_data = _coerce_unbinned_data_obs(channel_obs[channel], payload_data)
+                    if channel_data is None:
+                        continue
+                    observed_data[channel] = channel_data
+                    observed_values_by_channel[channel] = np.asarray(channel_data.value(), dtype=float).reshape(-1)
 
         expected_observation = float(sum(card.observations.values())) if card.observations else card.observation_count
         if observed_data is not None and expected_observation is not None:
@@ -704,8 +731,36 @@ def build_model_from_card(card: CardSpec, card_dir: str):
         term_name: shapes[term_name].create_extended(yields[term_name])
         for term_name in term_names
     }
+
+    channel_extended = {channel: [] for channel in card.channels}
+    for term_name, channel in term_channels.items():
+        channel_extended[channel].append(extended_pdfs[term_name])
+
+    channel_models: Dict[str, zfit.pdf.BasePDF] = {}
+    for channel, pdfs in channel_extended.items():
+        if not pdfs:
+            continue
+        if len(pdfs) == 1:
+            channel_models[channel] = pdfs[0]
+        else:
+            channel_models[channel] = zfit.pdf.SumPDF(pdfs, name=f"model_{channel}")
+
     model_name = f"model_{card.category}" if len(card.channels) == 1 else "model_combined"
-    model = zfit.pdf.SumPDF(list(extended_pdfs.values()), name=model_name)
+    mixed_channel_observables = False
+    if len(channel_models) == 1:
+        model = next(iter(channel_models.values()))
+    else:
+        signatures = {
+            _space_signature(channel_models[channel].space)
+            for channel in channel_models
+        }
+        if len(signatures) == 1:
+            model = zfit.pdf.SumPDF(list(extended_pdfs.values()), name=model_name)
+        else:
+            mixed_channel_observables = True
+            # No single-space aggregate model exists for mixed-observable categories.
+            # Keep one channel model as representative; simultaneous fitting uses channel_models.
+            model = next(iter(channel_models.values()))
 
     # Apply explicit parameter Gaussian constraints from 'param' card lines.
     # Collect all named parameters from the model for lookup.
@@ -755,6 +810,9 @@ def build_model_from_card(card: CardSpec, card_dir: str):
         term_processes=term_processes,
         observed_counts_by_channel=observed_counts_by_channel,
         observed_values_by_channel=observed_values_by_channel,
+        channel_models=channel_models if mixed_channel_observables else {},
+        channel_obs=channel_obs if not card.is_counting else {},
+        channel_obs_ranges=channel_obs_ranges if not card.is_counting else {},
     )
 
 
@@ -769,8 +827,6 @@ def build_and_save_model_from_card_file(input_card: str, output_file: str) -> st
     # For counting models this is the summed observed count across categories.
     if card.is_counting and card.observations:
         fit_model.data = float(sum(card.observations.values()))
-    elif card.is_counting and card.observation_count is not None:
-        fit_model.data = card.observation_count
 
     output_path = os.path.abspath(output_file)
     save_fit_model_bundle(fit_model, output_path, card=card, card_dir=card_dir)

@@ -1,5 +1,6 @@
 import pickle
 import dill
+import numpy as np
 import zfit
 
 obs = zfit.Space("mass", limits=(100.0, 110.0))
@@ -27,6 +28,23 @@ RATES = {
     "sig": 12.0,
     "bkg": 80.0,
 }
+RNG_SEED = 12345
+
+
+def _sample_component(pdf, yield_mean, rng):
+    n_events = int(rng.poisson(float(yield_mean)))
+    if n_events <= 0:
+        return np.empty(0, dtype=float)
+    return np.asarray(pdf.sample(n=n_events).value(), dtype=float).reshape(-1)
+
+
+def make_toy_data_obs(rng_seed=RNG_SEED):
+    rng = np.random.default_rng(int(rng_seed))
+    sig_values = _sample_component(sig_pdf, RATES["sig"], rng)
+    bkg_values = _sample_component(bkg_pdf, RATES["bkg"], rng)
+    toy_values = np.concatenate([sig_values, bkg_values]) if (sig_values.size or bkg_values.size) else np.empty(0, dtype=float)
+    rng.shuffle(toy_values)
+    return toy_values
 
 
 def make_shape_payload():
@@ -40,6 +58,9 @@ def make_shape_payload():
             "bkg_slopeDown": bkg_slopeDown,
         },
         "rates": dict(RATES),
+        "data_obs": {
+            "values": make_toy_data_obs(),
+        },
     }
 
 

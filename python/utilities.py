@@ -30,6 +30,9 @@ class FitModel:
     term_processes: Dict[str, str] = field(default_factory=dict)
     observed_counts_by_channel: Dict[str, float] = field(default_factory=dict)
     observed_values_by_channel: Dict[str, Any] = field(default_factory=dict)
+    channel_models: Dict[str, zfit.pdf.BasePDF] = field(default_factory=dict)
+    channel_obs: Dict[str, zfit.Space] = field(default_factory=dict)
+    channel_obs_ranges: Dict[str, tuple] = field(default_factory=dict)
 
 # ==============================================================================
 # Helper Function: Convert a ROOT Histogram to zfit-compatible BinnedData

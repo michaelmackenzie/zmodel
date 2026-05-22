@@ -1,7 +1,17 @@
 def find_parameter_by_name(fit_model, parameter_name):
-    for param in fit_model.model.get_params():
-        if param.name == parameter_name:
-            return param
+    seen = set()
+
+    channel_models = getattr(fit_model, "channel_models", {}) or {}
+    models = list(channel_models.values()) if channel_models else [fit_model.model]
+
+    for model in models:
+        for param in model.get_params():
+            ident = id(param)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            if param.name == parameter_name:
+                return param
     return None
 
 

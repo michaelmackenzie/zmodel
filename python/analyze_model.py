@@ -44,23 +44,23 @@ def _load_analysis_model(model_file=None, input_card=None):
     return build_model_from_card(card, os.path.dirname(card_path))
 
 
-def _print_toy_summary(summary, is_observed_fit=False):
+def _print_dataset_summary(summary, is_observed_fit=False):
     poi_label = summary.get("poi_name", "poi")
     poi_fit = summary.get("poi_fit")
     poi_unc = summary.get("poi_unc_hesse")
     fit_text = f"{poi_fit:.3g}" if poi_fit is not None else "n/a"
     unc_text = f"{poi_unc:.3g}" if poi_unc is not None else "n/a"
     status_text = "valid" if summary['valid'] else "invalid"
-    if summary.get("asimov_fit") or summary.get("toy_plot", {}).get("asimov"):
+    if summary.get("asimov_fit") or summary.get("dataset_plot", {}).get("asimov"):
         label = "Asimov data"
-    elif is_observed_fit or summary.get("observed_fit") or summary.get("toy_plot", {}).get("observed"):
+    elif is_observed_fit or summary.get("observed_fit") or summary.get("dataset_plot", {}).get("observed"):
         label = "Observed data"
     else:
-        label = f"Toy {summary['toy']:3d}"
+        label = f"Toy {summary['dataset_id']:3d}"
     print(
         f"{label}: {status_text:<7}, "
         f"{poi_label}={fit_text:<10} +- {unc_text:<10}, "
-        f"time={summary.get('toy_time_s', float('nan')):.4f}s"
+        f"time={summary.get('dataset_time_s', float('nan')):.4f}s"
     )
     # if "count" in summary:
     #     print(f"  Toy count: {summary['count']}")
@@ -391,7 +391,7 @@ def run_analysis_cli(args):
             feldman_cousins_scan_points=args.fc_scan_points,
             feldman_cousins_n_toys=args.fc_toys,
             feldman_cousins_scan_max=args.fc_scan_max,
-            progress_callback=_print_toy_summary,
+            progress_callback=_print_dataset_summary,
             checkpoint_freq=args.checkpoint_freq,
             checkpoint_path=args.output_pkl + ".checkpoint" if args.checkpoint_freq else None,
             existing_results=existing_results,
@@ -427,7 +427,7 @@ def run_analysis_cli(args):
         print(f"Saved plots to: {os.path.abspath(args.plot_dir)}")
 
     if summaries:
-        print(f"Average time per toy: {total_time_s / len(summaries):.4f}s")
+        print(f"Average time per dataset: {total_time_s / len(summaries):.4f}s")
     print(f"Total execution time: {total_time_s:.4f}s")
 
     output_pkl = args.output_pkl

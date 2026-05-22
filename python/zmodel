@@ -37,10 +37,10 @@ def _add_analyze_arguments(parser):
         help="Optional POI scan maximum for Feldman-Cousins (default: automatic)",
     )
     source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument("--model-file", "-f", type=str, help="Path to a saved model file (default format: .pkl)")
+    source.add_argument("--model-file", "-m", type=str, help="Path to a saved model file (default format: .pkl)")
     source.add_argument("--input-card", "-c", type=str, help="Path to a text model card")
     parser.add_argument(
-        "--toys",
+        "--toys", "-t",
         type=int,
         default=None,
         help="Number of toy datasets to generate and fit (default: use observed data if available, otherwise 1; use -1 for binned Asimov data)",

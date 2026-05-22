@@ -49,7 +49,25 @@ def _build_counting_binned_space(fit_model):
 
 def _binning_edges_as_float_array(binning):
     edges = getattr(binning, "edges", binning)
-    return np.asarray(list(edges), dtype=float)
+
+    # zfit can expose edges as a per-axis container (e.g. tuple with one entry
+    # for 1D), while np.histogram requires a flat 1D edge array.
+    if isinstance(edges, (list, tuple)):
+        if len(edges) == 1:
+            edges = edges[0]
+        else:
+            raise ValueError("Binned fits currently support only 1D observables")
+
+    if hasattr(edges, "numpy"):
+        edges = edges.numpy()
+
+    arr = np.asarray(edges, dtype=float)
+    if arr.ndim == 2 and arr.shape[0] == 1:
+        arr = arr[0]
+    elif arr.ndim != 1:
+        raise ValueError("Binned fits currently support only 1D observables")
+
+    return arr
 
 
 def _build_binned_space(fit_model, bins):
@@ -66,6 +84,30 @@ def _build_binned_space(fit_model, bins):
     return zfit.Space(obs_names[0], binning=binning)
 
 
+def _build_channel_binned_spaces(fit_model, bins):
+    channel_obs = getattr(fit_model, "channel_obs", {}) or {}
+    channel_ranges = getattr(fit_model, "channel_obs_ranges", {}) or {}
+    spaces = {}
+    for channel, obs_space in channel_obs.items():
+        obs_names = getattr(obs_space, "obs", None)
+        if not obs_names or len(obs_names) != 1:
+            raise ValueError("Binned fits currently support only 1D observables per channel")
+
+        low, high = channel_ranges.get(channel, tuple(float(x) for x in obs_space.limit1d))
+        edges = np.linspace(float(low), float(high), int(bins) + 1)
+        binning = zfit.binned.VariableBinning(edges, name=obs_names[0])
+        spaces[channel] = zfit.Space(obs_names[0], binning=binning)
+    return spaces
+
+
+def _build_channel_binned_models(fit_model, channel_binned_spaces):
+    channel_models = _channel_models(fit_model)
+    return {
+        channel: model.to_binned(channel_binned_spaces[channel])
+        for channel, model in channel_models.items()
+    }
+
+
 def _make_binned_toy_data(model, binned_space):
     sample = model.sample(n="auto")
     values = np.asarray(sample.value(), dtype=float).reshape(-1)
@@ -73,6 +115,38 @@ def _make_binned_toy_data(model, binned_space):
     counts, _ = np.histogram(values, bins=edges)
     data = zfit.data.BinnedData.from_tensor(space=binned_space, values=counts.astype(float))
     return data, values, edges, counts.astype(float)
+
+
+def _channel_models(fit_model):
+    return getattr(fit_model, "channel_models", {}) or {}
+
+
+def _all_models(fit_model):
+    channel_models = _channel_models(fit_model)
+    if channel_models:
+        return list(channel_models.values())
+    return [fit_model.model]
+
+
+def _all_params(fit_model):
+    params = []
+    seen = set()
+    for model in _all_models(fit_model):
+        for param in model.get_params():
+            ident = id(param)
+            if ident in seen:
+                continue
+            seen.add(ident)
+            params.append(param)
+    return params
+
+
+def _capture_fit_model_parameter_values(fit_model):
+    values = {}
+    for param in _all_params(fit_model):
+        if hasattr(param, "set_value"):
+            values[param] = float(param.value())
+    return values
 
 
 def _capture_parameter_values(model):
@@ -91,11 +165,11 @@ def _restore_parameter_values(saved_values):
 def _find_signal_parameter(fit_model):
     if fit_model.signal_process is not None:
         target = f"mu_{fit_model.signal_process}"
-        for param in fit_model.model.get_params():
+        for param in _all_params(fit_model):
             if param.name == target:
                 return param
 
-    for param in fit_model.model.get_params():
+    for param in _all_params(fit_model):
         if param.name.startswith("mu_"):
             return param
 
@@ -311,6 +385,38 @@ def _expected_counts_by_channel(fit_model):
 
 
 def _build_toy_data(fit_model, resolved_fit_mode, binned_space, is_counting):
+    channel_models = _channel_models(fit_model)
+
+    if channel_models:
+        if resolved_fit_mode == "binned":
+            if not isinstance(binned_space, dict):
+                raise ValueError("Expected per-channel binned spaces for channel-based binned fit")
+
+            channel_data = {}
+            channel_binned = {}
+            for channel, model in channel_models.items():
+                if channel not in binned_space:
+                    raise ValueError(f"Missing binned space for channel '{channel}'")
+                data, values, edges, counts = _make_binned_toy_data(model, binned_space[channel])
+                channel_data[channel] = data
+                channel_binned[channel] = {
+                    "edges": edges.tolist(),
+                    "counts": counts.tolist(),
+                    "values": values.tolist(),
+                }
+            dataset_plot = {"mode": "binned", "channel_binned": channel_binned}
+            return channel_data, None, dataset_plot
+
+        channel_data = {}
+        channel_values = {}
+        for channel, model in channel_models.items():
+            sample = model.sample(n="auto")
+            values = np.asarray(sample.value(), dtype=float).reshape(-1)
+            channel_data[channel] = sample
+            channel_values[channel] = values
+        dataset_plot = {"mode": "unbinned", "channel_values": channel_values}
+        return channel_data, None, dataset_plot
+
     if resolved_fit_mode == "binned":
         if is_counting:
             expected = float(fit_model.model.get_yield().value())
@@ -326,31 +432,50 @@ def _build_toy_data(fit_model, resolved_fit_mode, binned_space, is_counting):
             edges = np.array([float(low), float(high)], dtype=float)
             counts = np.array([float(toy_count)], dtype=float)
             data = zfit.data.BinnedData.from_tensor(space=binned_space, values=counts)
-            toy_plot = {"mode": "binned", "edges": edges, "counts": counts}
+            dataset_plot = {"mode": "binned", "edges": edges, "counts": counts}
             if channel_counts:
-                toy_plot["channel_counts"] = channel_counts
-            return data, toy_count, toy_plot
+                dataset_plot["channel_counts"] = channel_counts
+            return data, toy_count, dataset_plot
 
         data, values, edges, counts = _make_binned_toy_data(fit_model.model, binned_space)
-        toy_plot = {
+        dataset_plot = {
             "mode": "binned",
             "edges": edges,
             "counts": counts,
             "values": values,
         }
-        return data, None, toy_plot
+        return data, None, dataset_plot
 
     data = fit_model.model.sample(n="auto")
     values = np.asarray(data.value(), dtype=float).reshape(-1)
-    toy_plot = {"mode": "unbinned", "values": values}
-    return data, None, toy_plot
+    dataset_plot = {"mode": "unbinned", "values": values}
+    return data, None, dataset_plot
 
 
 def _build_asimov_binned_data(binned_model, binned_space, fit_model):
+    if isinstance(binned_model, dict):
+        data = {}
+        channel_binned = {}
+        for channel, model in binned_model.items():
+            channel_data = model.to_binneddata()
+            expected_counts = np.asarray(model.values(), dtype=float).reshape(-1)
+            edges = _binning_edges_as_float_array(binned_space[channel].binning)
+            data[channel] = channel_data
+            channel_binned[channel] = {
+                "edges": edges.tolist(),
+                "counts": expected_counts.tolist(),
+            }
+        dataset_plot = {
+            "mode": "binned",
+            "channel_binned": channel_binned,
+            "asimov": True,
+        }
+        return data, channel_binned, dataset_plot
+
     data = binned_model.to_binneddata()
     expected_counts = np.asarray(binned_model.values(), dtype=float).reshape(-1)
     edges = _binning_edges_as_float_array(binned_space.binning)
-    toy_plot = {
+    dataset_plot = {
         "mode": "binned",
         "edges": edges,
         "counts": expected_counts,
@@ -358,11 +483,39 @@ def _build_asimov_binned_data(binned_model, binned_space, fit_model):
     }
     channel_expectations = _expected_counts_by_channel(fit_model)
     if channel_expectations:
-        toy_plot["channel_counts"] = channel_expectations
-    return data, expected_counts, toy_plot
+        dataset_plot["channel_counts"] = channel_expectations
+    return data, expected_counts, dataset_plot
 
 
 def _build_loss(fit_model, resolved_fit_mode, binned_model, data):
+    channel_models = _channel_models(fit_model)
+
+    if channel_models:
+        if not isinstance(data, dict):
+            raise ValueError("Expected per-channel dataset dictionary for channel-based model")
+
+        combined_loss = None
+        for index, (channel, model) in enumerate(channel_models.items()):
+            if channel not in data:
+                raise ValueError(f"Missing dataset for channel '{channel}'")
+            constraints = fit_model.constraints if index == 0 else []
+            if resolved_fit_mode == "binned":
+                if not isinstance(binned_model, dict) or channel not in binned_model:
+                    raise ValueError(f"Missing binned model for channel '{channel}'")
+                loss = zfit.loss.ExtendedBinnedNLL(
+                    model=binned_model[channel],
+                    data=data[channel],
+                    constraints=constraints,
+                )
+            else:
+                loss = zfit.loss.ExtendedUnbinnedNLL(
+                    model=model,
+                    data=data[channel],
+                    constraints=constraints,
+                )
+            combined_loss = loss if combined_loss is None else combined_loss + loss
+        return combined_loss
+
     if resolved_fit_mode == "binned":
         return zfit.loss.ExtendedBinnedNLL(
             model=binned_model,
@@ -505,7 +658,7 @@ def _compute_nll_scan_for_plot(loss, minimizer, poi_param, poi_unc, fit_model, p
     scan_values = np.linspace(scan_low, scan_high, int(n_points))
 
     # Save best-fit values for all parameters (after global fit)
-    bestfit_values = _capture_parameter_values(fit_model.model)
+    bestfit_values = _capture_fit_model_parameter_values(fit_model)
     was_floating = getattr(poi_param, "floating", True)
 
     nll_values = []
@@ -513,7 +666,7 @@ def _compute_nll_scan_for_plot(loss, minimizer, poi_param, poi_unc, fit_model, p
         poi_param.floating = False
         for v in scan_values:
             # Reset all floating nuisance parameters to their best-fit values before each scan point
-            for param in fit_model.model.get_params():
+            for param in _all_params(fit_model):
                 if param is not poi_param and getattr(param, "floating", False):
                     if hasattr(param, "set_value") and param in bestfit_values:
                         param.set_value(bestfit_values[param])
@@ -568,6 +721,39 @@ def _resolve_data_mode(use_observed_data, use_asimov_data):
 
 
 def _build_observed_input(fit_model, resolved_fit_mode, binned_space):
+    channel_models = _channel_models(fit_model)
+
+    if channel_models and resolved_fit_mode == "binned":
+        if not isinstance(fit_model.data, dict):
+            raise ValueError("Observed data for channel-based binned fit must be a per-channel dictionary")
+        if not isinstance(binned_space, dict):
+            raise ValueError("Expected per-channel binned spaces for channel-based binned fit")
+
+        channel_data = {}
+        channel_binned = {}
+        for channel, dataset in fit_model.data.items():
+            if channel not in binned_space:
+                raise ValueError(f"Missing binned space for channel '{channel}'")
+            edges = _binning_edges_as_float_array(binned_space[channel].binning)
+            values = np.asarray(dataset.value(), dtype=float).reshape(-1)
+            counts, _ = np.histogram(values, bins=edges)
+            channel_data[channel] = zfit.data.BinnedData.from_tensor(
+                space=binned_space[channel],
+                values=counts.astype(float),
+            )
+            channel_binned[channel] = {
+                "edges": edges.tolist(),
+                "counts": counts.astype(float).tolist(),
+                "values": values.tolist(),
+            }
+
+        dataset_plot = {
+            "mode": "binned",
+            "channel_binned": channel_binned,
+            "observed": True,
+        }
+        return channel_data, None, dataset_plot
+
     if resolved_fit_mode == "binned":
         edges = _binning_edges_as_float_array(binned_space.binning)
         if hasattr(fit_model.data, "value"):
@@ -583,7 +769,7 @@ def _build_observed_input(fit_model, resolved_fit_mode, binned_space):
             counts = np.array([observed_count], dtype=float)
             data = zfit.data.BinnedData.from_tensor(space=binned_space, values=counts)
 
-        toy_plot = {
+        dataset_plot = {
             "mode": "binned",
             "edges": edges,
             "counts": counts.astype(float),
@@ -591,24 +777,37 @@ def _build_observed_input(fit_model, resolved_fit_mode, binned_space):
             "observed": True,
         }
         if getattr(fit_model, "observed_counts_by_channel", None):
-            toy_plot["channel_counts"] = {
+            dataset_plot["channel_counts"] = {
                 k: float(v)
                 for k, v in fit_model.observed_counts_by_channel.items()
             }
-        return data, None, toy_plot
+        return data, None, dataset_plot
 
     data = fit_model.data
+    if channel_models:
+        if not isinstance(data, dict):
+            raise ValueError("Observed data for mixed-observable channels must be a per-channel dictionary")
+        channel_values = {}
+        for channel, dataset in data.items():
+            if hasattr(dataset, "value"):
+                values = np.asarray(dataset.value(), dtype=float).reshape(-1)
+            else:
+                values = np.array([float(dataset)], dtype=float)
+            channel_values[channel] = values
+        dataset_plot = {"mode": "unbinned", "channel_values": channel_values, "observed": True}
+        return data, None, dataset_plot
+
     if hasattr(data, "value"):
         observed_values = np.asarray(data.value(), dtype=float).reshape(-1)
     else:
         observed_values = np.array([float(data)], dtype=float)
-    toy_plot = {"mode": "unbinned", "values": observed_values, "observed": True}
+    dataset_plot = {"mode": "unbinned", "values": observed_values, "observed": True}
     if getattr(fit_model, "observed_values_by_channel", None):
-        toy_plot["channel_values"] = {
+        dataset_plot["channel_values"] = {
             k: np.asarray(v, dtype=float).reshape(-1)
             for k, v in fit_model.observed_values_by_channel.items()
         }
-    return data, None, toy_plot
+    return data, None, dataset_plot
 
 
 def _build_iteration_input(
@@ -652,7 +851,7 @@ def _build_fit_summary(
         )
         fit_result = minimizer.minimize(loss)
         return {
-            "toy": sample_index + 1,
+            "dataset_id": sample_index + 1,
             "valid": profile_summary["valid"] and bool(fit_result.valid),
             "edm": None,
             "fit_mode": resolved_fit_mode,
@@ -669,7 +868,7 @@ def _build_fit_summary(
 
     result = minimizer.minimize(loss)
     return {
-        "toy": sample_index + 1,
+        "dataset_id": sample_index + 1,
         "valid": bool(result.valid),
         "edm": float(result.edm) if result.edm is not None else None,
         "fit_mode": resolved_fit_mode,
@@ -720,13 +919,13 @@ def _apply_cls_to_summary(
         return
 
     # Compute expected asymptotic CLs limits using nuisance parameters from a b-only fit.
-    pre_bonly_values = _capture_parameter_values(fit_model.model)
+    pre_bonly_values = _capture_fit_model_parameter_values(fit_model)
     pre_bonly_float = bool(getattr(signal_param, "floating", True))
     try:
         signal_param.set_value(0.0)
         signal_param.floating = False
         minimizer.minimize(loss)
-        bonly_values = _capture_parameter_values(fit_model.model)
+        bonly_values = _capture_fit_model_parameter_values(fit_model)
 
         _restore_parameter_values(bonly_values)
         signal_param.floating = True
@@ -794,7 +993,7 @@ def _compute_feldman_cousins_for_toy(
     fc_toy_fit_results = []
 
     minimizer = zfit.minimize.Minuit()
-    starting_values = _capture_parameter_values(fit_model.model)
+    starting_values = _capture_fit_model_parameter_values(fit_model)
     original_floating = bool(getattr(poi_param, "floating", True))
 
     try:
@@ -924,8 +1123,8 @@ def _run_single(
 
     if generated_count is not None:
         summary["count"] = generated_count
-    summary["toy_time_s"] = time.perf_counter() - start_time
-    summary["toy_plot"] = data_plot
+    summary["dataset_time_s"] = time.perf_counter() - start_time
+    summary["dataset_plot"] = data_plot
     summary["observed_fit"] = (data_mode == "observed")
     summary["asimov_fit"] = (data_mode == "asimov")
 
@@ -1024,14 +1223,18 @@ def run_analysis(
     if poi_param is None:
         raise ValueError("Could not identify a parameter of interest")
 
-    starting_values = _capture_parameter_values(fit_model.model)
+    starting_values = _capture_fit_model_parameter_values(fit_model)
     summaries = list(existing_results) if existing_results else []
     minimizer = zfit.minimize.Minuit()
     binned_space = None
     binned_model = None
     if resolved_fit_mode == "binned":
-        binned_space = _build_binned_space(fit_model, binned_bins)
-        binned_model = fit_model.model.to_binned(binned_space)
+        if _channel_models(fit_model):
+            binned_space = _build_channel_binned_spaces(fit_model, binned_bins)
+            binned_model = _build_channel_binned_models(fit_model, binned_space)
+        else:
+            binned_space = _build_binned_space(fit_model, binned_bins)
+            binned_model = fit_model.model.to_binned(binned_space)
 
     if use_asimov_data and resolved_fit_mode != "binned":
         raise ValueError("--toys -1 is only supported for binned fits")

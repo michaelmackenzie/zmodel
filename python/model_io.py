@@ -52,31 +52,11 @@ def _serialize_card(card, card_dir: Optional[str]) -> Dict[str, Any]:
 def _deserialize_card(card_payload: Dict[str, Any]):
     from build_model_from_text import CardSpec, ShapeSpec, UncertaintySpec, ConstraintSpec
 
-    shape_specs_payload = card_payload.get("shape_specs")
-    if shape_specs_payload is None:
-        # Backward compatibility with older bundles.
-        shape_specs_payload = []
-        for process, shape_file in card_payload.get("shape_files", {}).items():
-            shape_specs_payload.append({"process": process, "channel": "*", "file": shape_file})
-
-    if "rates" in card_payload and isinstance(card_payload.get("rates"), list):
-        rates = list(card_payload.get("rates", []))
-    else:
-        # Legacy bundles used dict rates keyed by process.
-        legacy_rates = dict(card_payload.get("rates", {}))
-        legacy_processes = list(card_payload.get("process_names", []))
-        rates = [legacy_rates.get(name) for name in legacy_processes]
-
-    channels = list(card_payload.get("channels", []))
-    bin_names = list(card_payload.get("bin_names", []))
-    if not channels and "category" in card_payload:
-        channels = [card_payload["category"]]
-    if not bin_names and channels:
-        bin_names = [channels[0]] * len(card_payload.get("process_names", []))
-
+    shape_specs_payload = card_payload["shape_specs"]
+    rates = list(card_payload["rates"])
+    channels = list(card_payload["channels"])
+    bin_names = list(card_payload["bin_names"])
     observations = dict(card_payload.get("observations", {}))
-    if not observations and card_payload.get("observation_count") is not None and channels:
-        observations[channels[0]] = float(card_payload.get("observation_count"))
 
     return CardSpec(
         shape_specs=[ShapeSpec(**item) for item in shape_specs_payload],
@@ -196,8 +176,5 @@ def load_fit_model(model_file: str) -> FitModel:
                 "Saved bundle has no JSON-serializable HS3 payload and no card to rebuild from"
             )
         return _fit_model_from_hs3_payload(hs3_payload, payload.get("fit_metadata"))
-
-    if "metadata" in payload and "distributions" in payload:
-        return _fit_model_from_hs3_payload(payload)
 
     raise ValueError(f"Unsupported model file format in {model_file}")
