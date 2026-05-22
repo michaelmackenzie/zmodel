@@ -322,7 +322,7 @@ def _coerce_unbinned_data_obs(obs_space, payload):
     if payload is None:
         return None
 
-    if hasattr(payload, "space") and hasattr(payload, "value"):
+    if hasattr(payload, "space") and (hasattr(payload, "value") or hasattr(payload, "values")):
         return payload
 
     if isinstance(payload, dict) and "values" in payload:
@@ -335,6 +335,42 @@ def _coerce_unbinned_data_obs(obs_space, payload):
         values = values.reshape(-1, 1)
 
     return zfit.Data.from_numpy(obs=obs_space, array=values)
+
+
+def _data_obs_to_unbinned_values(data_obs, obs_space) -> np.ndarray:
+    if data_obs is None:
+        return np.empty(0, dtype=float)
+
+    value_method = getattr(data_obs, "value", None)
+    if callable(value_method):
+        values = np.asarray(value_method(), dtype=float)
+        return values.reshape(-1)
+
+    values_method = getattr(data_obs, "values", None)
+    if callable(values_method):
+        values = np.asarray(values_method(), dtype=float).reshape(-1)
+        data_space = getattr(data_obs, "space", obs_space)
+        obs_names = tuple(getattr(data_space, "obs", ()) or ())
+        has_binning = False
+        if len(obs_names) == 1:
+            try:
+                _ = data_space.binning[obs_names[0]].edges
+                has_binning = True
+            except Exception:
+                has_binning = False
+
+        if getattr(data_space, "binned", False) or has_binning:
+            if len(obs_names) != 1:
+                raise ValueError("Only 1D binned observed datasets are supported")
+            obs_name = obs_names[0]
+            edges = np.asarray(data_space.binning[obs_name].edges, dtype=float)
+            centers = 0.5 * (edges[:-1] + edges[1:])
+            counts = np.maximum(np.rint(values).astype(int), 0)
+            return np.repeat(centers, counts)
+        return values
+
+    values = np.asarray(data_obs, dtype=float)
+    return values.reshape(-1)
 
 
 def _space_signature(space):
@@ -494,6 +530,49 @@ def multiply_factors(base: float, factors: List[zfit.Parameter], name: str):
     )
 
 
+def _create_extended_pdf(pdf, yield_param, name_suffix: str = "_ext"):
+    try:
+        return pdf.create_extended(yield_param)
+    except Exception:
+        pass
+
+    if hasattr(pdf, "copy") and callable(pdf.copy):
+        try:
+            new_name = getattr(pdf, "name", "pdf") + name_suffix
+            extended_pdf = pdf.copy(name=new_name)
+        except Exception:
+            extended_pdf = pdf
+    else:
+        extended_pdf = pdf
+
+    if bool(getattr(extended_pdf, "is_extended", False)):
+        return extended_pdf
+
+    set_yield = getattr(extended_pdf, "set_yield", None)
+    if callable(set_yield):
+        try:
+            set_yield(yield_param)
+        except Exception:
+            if bool(getattr(extended_pdf, "is_extended", False)):
+                return extended_pdf
+            raise
+        return extended_pdf
+
+    private_set_yield = getattr(extended_pdf, "_set_yield", None)
+    if callable(private_set_yield):
+        try:
+            private_set_yield(yield_param)
+        except Exception:
+            if bool(getattr(extended_pdf, "is_extended", False)):
+                return extended_pdf
+            raise
+        return extended_pdf
+
+    raise ValueError(
+        f"Could not create an extended PDF for '{getattr(pdf, 'name', type(pdf).__name__)}'"
+    )
+
+
 def _kind_token(kind: str) -> str:
     token = kind.strip()
     if token == "lnN":
@@ -585,7 +664,7 @@ def build_model_from_card(card: CardSpec, card_dir: str):
                 channel_data = _coerce_unbinned_data_obs(channel_obs[channel], _extract_data_obs_payload(obs_payload))
                 if channel_data is None:
                     continue
-                channel_values = np.asarray(channel_data.value(), dtype=float)
+                channel_values = _data_obs_to_unbinned_values(channel_data, channel_obs[channel])
                 if channel_values.ndim == 1:
                     channel_values = channel_values.reshape(-1, 1)
                 observed_values_by_channel[channel] = channel_values.reshape(-1)
@@ -615,7 +694,7 @@ def build_model_from_card(card: CardSpec, card_dir: str):
             if len(card.channels) == 1:
                 observed_data = _coerce_unbinned_data_obs(obs_space, _extract_data_obs_payload(obs_payload))
                 if observed_data is not None:
-                    observed_values_by_channel[card.channels[0]] = np.asarray(observed_data.value(), dtype=float).reshape(-1)
+                    observed_values_by_channel[card.channels[0]] = _data_obs_to_unbinned_values(observed_data, obs_space)
             else:
                 observed_data = {}
                 payload_data = _extract_data_obs_payload(obs_payload)
@@ -624,7 +703,7 @@ def build_model_from_card(card: CardSpec, card_dir: str):
                     if channel_data is None:
                         continue
                     observed_data[channel] = channel_data
-                    observed_values_by_channel[channel] = np.asarray(channel_data.value(), dtype=float).reshape(-1)
+                    observed_values_by_channel[channel] = _data_obs_to_unbinned_values(channel_data, channel_obs[channel])
 
         expected_observation = float(sum(card.observations.values())) if card.observations else card.observation_count
         if observed_data is not None and expected_observation is not None:
@@ -640,7 +719,7 @@ def build_model_from_card(card: CardSpec, card_dir: str):
     signal_processes = {
         process
         for process, proc_id in zip(card.process_names, card.process_ids)
-        if proc_id < 0
+        if proc_id <= 0
     }
     process_id_map = {
         process: proc_id
@@ -728,7 +807,7 @@ def build_model_from_card(card: CardSpec, card_dir: str):
         )
 
     extended_pdfs = {
-        term_name: shapes[term_name].create_extended(yields[term_name])
+        term_name: _create_extended_pdf(shapes[term_name], yields[term_name])
         for term_name in term_names
     }
 
@@ -780,7 +859,7 @@ def build_model_from_card(card: CardSpec, card_dir: str):
             )
         )
 
-    signal_name = next((name for name, proc_id in process_id_map.items() if proc_id < 0), None)
+    signal_name = next((name for name, proc_id in process_id_map.items() if proc_id <= 0), None)
     signal_nominal_yield = None
     if signal_name is not None:
         signal_nominal_yield = float(

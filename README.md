@@ -70,6 +70,40 @@ Generate plots from a saved analysis snapshot:
 plot_analysis.py analysis_output.pkl --plot-dir plots_from_snapshot
 ```
 
+Convert RooFit workspaces in a ROOT file into zfit shape payloads that can be used as `shapes` inputs:
+
+```bash
+python python/convert_rooworkspace_shapes.py input.root --output-dir shapes
+```
+
+The converter writes one pickle per `RooWorkspace` and currently supports a focused subset of PDFs with clear zfit equivalents, including Gaussian, exponential, uniform, histogram, Chebyshev, and Crystal Ball forms. Unsupported PDFs raise an error.
+
+The same module also exposes helper functions for the reverse direction, converting zfit parameters, datasets, and PDFs back into RooFit objects when needed. To export a saved zfit analysis snapshot back into a ROOT file containing a `RooWorkspace`, use:
+
+```bash
+python python/convert_rooworkspace_shapes.py analysis_output.pkl --output-root workspace.root
+```
+
+Convert text cards between Combine and zmodel formats:
+
+```bash
+# Combine -> zmodel (auto-detects Combine input)
+python python/convert_datacard_format.py \
+	/exp/mu2e/app/users/mmackenz/conv/ConvAna/analysis/datacards/combine_mumem_20_r0102.txt \
+	examples/mumem_20_zmodel_card.txt \
+	--shapes-file shapes/workspace_mumem_20_r0102.pkl
+
+# zmodel -> Combine
+python python/convert_datacard_format.py \
+	examples/mumem_20_zmodel_card.txt \
+	examples/mumem_20_combine_card.txt \
+	--direction zmodel-to-combine \
+	--root-file workspaces/workspace_mumem_20_r0102.root \
+	--workspace-name workspace \
+	--pdf-template 'mumem_20_$PROCESS_pdf' \
+	--syst-template 'mumem_20_$PROCESS_pdf_$SYSTEMATIC'
+```
+
 ## Notes
 
 - No user-specific file locations are required by default.

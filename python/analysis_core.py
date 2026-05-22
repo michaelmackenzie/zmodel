@@ -30,9 +30,38 @@ def configure_runtime(graph_mode, fit_model, toys):
     zfit.run.set_graph_mode(use_graph)
 
 
+def _is_binned_dataset(dataset):
+    if dataset is None:
+        return False
+
+    data_space = getattr(dataset, "space", None)
+    if data_space is not None and getattr(data_space, "binned", False):
+        return True
+
+    # zfit BinnedData exposes values() and not value().
+    has_values = callable(getattr(dataset, "values", None))
+    has_value = callable(getattr(dataset, "value", None))
+    return has_values and not has_value
+
+
+def _has_histogram_input_data(fit_model):
+    data = getattr(fit_model, "data", None)
+    if isinstance(data, dict):
+        return any(_is_binned_dataset(entry) for entry in data.values())
+    return _is_binned_dataset(data)
+
+
+def _native_binned_space_from_data(dataset):
+    if not _is_binned_dataset(dataset):
+        return None
+    return getattr(dataset, "space", None)
+
+
 def _resolve_fit_mode(fit_mode, fit_model):
     if fit_mode == "auto":
-        return "binned" if is_likely_counting_model(fit_model) else "unbinned"
+        if is_likely_counting_model(fit_model) or _has_histogram_input_data(fit_model):
+            return "binned"
+        return "unbinned"
     return fit_mode
 
 
@@ -71,6 +100,10 @@ def _binning_edges_as_float_array(binning):
 
 
 def _build_binned_space(fit_model, bins):
+    native_space = _native_binned_space_from_data(getattr(fit_model, "data", None))
+    if native_space is not None:
+        return native_space
+
     if is_likely_counting_model(fit_model):
         return _build_counting_binned_space(fit_model)
 
@@ -87,8 +120,16 @@ def _build_binned_space(fit_model, bins):
 def _build_channel_binned_spaces(fit_model, bins):
     channel_obs = getattr(fit_model, "channel_obs", {}) or {}
     channel_ranges = getattr(fit_model, "channel_obs_ranges", {}) or {}
+    channel_data = getattr(fit_model, "data", {}) or {}
     spaces = {}
     for channel, obs_space in channel_obs.items():
+        native_space = None
+        if isinstance(channel_data, dict):
+            native_space = _native_binned_space_from_data(channel_data.get(channel))
+        if native_space is not None:
+            spaces[channel] = native_space
+            continue
+
         obs_names = getattr(obs_space, "obs", None)
         if not obs_names or len(obs_names) != 1:
             raise ValueError("Binned fits currently support only 1D observables per channel")
@@ -758,6 +799,52 @@ def _resolve_data_mode(use_observed_data, use_asimov_data):
     return "toy"
 
 
+def _observed_dataset_to_values(dataset, fallback_space=None):
+    value_method = getattr(dataset, "value", None)
+    if callable(value_method):
+        return np.asarray(value_method(), dtype=float).reshape(-1)
+
+    values_method = getattr(dataset, "values", None)
+    if callable(values_method):
+        values = np.asarray(values_method(), dtype=float).reshape(-1)
+        data_space = getattr(dataset, "space", fallback_space)
+        obs_names = tuple(getattr(data_space, "obs", ()) or ()) if data_space is not None else ()
+        has_binning = False
+        if len(obs_names) == 1 and data_space is not None:
+            try:
+                _ = data_space.binning[obs_names[0]].edges
+                has_binning = True
+            except Exception:
+                has_binning = False
+
+        if has_binning:
+            edges = np.asarray(data_space.binning[obs_names[0]].edges, dtype=float)
+            centers = 0.5 * (edges[:-1] + edges[1:])
+            counts = np.maximum(np.rint(values).astype(int), 0)
+            return np.repeat(centers, counts)
+
+        return values
+
+    return np.array([float(dataset)], dtype=float)
+
+
+def _values_to_unbinned_dataset(values, obs_space):
+    values = np.asarray(values, dtype=float).reshape(-1)
+    unbinned_space = obs_space
+    if obs_space is not None and hasattr(obs_space, "obs"):
+        try:
+            unbinned_space = zfit.Space(obs=obs_space.obs, limits=obs_space.limits)
+        except Exception:
+            unbinned_space = obs_space
+
+    n_obs = len(getattr(unbinned_space, "obs", ()) or ()) if unbinned_space is not None else 1
+    if n_obs <= 1:
+        array = values.reshape(-1, 1)
+    else:
+        array = values.reshape(-1, n_obs)
+    return zfit.Data.from_numpy(obs=unbinned_space, array=array)
+
+
 def _build_observed_input(fit_model, resolved_fit_mode, binned_space):
     channel_models = _channel_models(fit_model)
 
@@ -773,7 +860,7 @@ def _build_observed_input(fit_model, resolved_fit_mode, binned_space):
             if channel not in binned_space:
                 raise ValueError(f"Missing binned space for channel '{channel}'")
             edges = _binning_edges_as_float_array(binned_space[channel].binning)
-            values = np.asarray(dataset.value(), dtype=float).reshape(-1)
+            values = _observed_dataset_to_values(dataset, binned_space[channel])
             counts, _ = np.histogram(values, bins=edges)
             channel_data[channel] = zfit.data.BinnedData.from_tensor(
                 space=binned_space[channel],
@@ -794,8 +881,8 @@ def _build_observed_input(fit_model, resolved_fit_mode, binned_space):
 
     if resolved_fit_mode == "binned":
         edges = _binning_edges_as_float_array(binned_space.binning)
-        if hasattr(fit_model.data, "value"):
-            observed_values = np.asarray(fit_model.data.value(), dtype=float).reshape(-1)
+        if hasattr(fit_model.data, "value") or hasattr(fit_model.data, "values"):
+            observed_values = _observed_dataset_to_values(fit_model.data, binned_space)
             counts, _ = np.histogram(observed_values, bins=edges)
             if hasattr(fit_model.data, "to_binned"):
                 data = fit_model.data.to_binned(binned_space)
@@ -825,27 +912,29 @@ def _build_observed_input(fit_model, resolved_fit_mode, binned_space):
     if channel_models:
         if not isinstance(data, dict):
             raise ValueError("Observed data for mixed-observable channels must be a per-channel dictionary")
+        channel_data = {}
         channel_values = {}
         for channel, dataset in data.items():
-            if hasattr(dataset, "value"):
-                values = np.asarray(dataset.value(), dtype=float).reshape(-1)
-            else:
-                values = np.array([float(dataset)], dtype=float)
+            values = _observed_dataset_to_values(dataset)
             channel_values[channel] = values
+            if hasattr(dataset, "value") and not hasattr(dataset, "values"):
+                channel_data[channel] = dataset
+            else:
+                channel_data[channel] = _values_to_unbinned_dataset(values, channel_models[channel].space)
         dataset_plot = {"mode": "unbinned", "channel_values": channel_values, "observed": True}
-        return data, None, dataset_plot
+        return channel_data, None, dataset_plot
 
-    if hasattr(data, "value"):
-        observed_values = np.asarray(data.value(), dtype=float).reshape(-1)
-    else:
-        observed_values = np.array([float(data)], dtype=float)
+    observed_values = _observed_dataset_to_values(data)
+    unbinned_data = data
+    if not hasattr(data, "value") or hasattr(data, "values"):
+        unbinned_data = _values_to_unbinned_dataset(observed_values, fit_model.model.space)
     dataset_plot = {"mode": "unbinned", "values": observed_values, "observed": True}
     if getattr(fit_model, "observed_values_by_channel", None):
         dataset_plot["channel_values"] = {
             k: np.asarray(v, dtype=float).reshape(-1)
             for k, v in fit_model.observed_values_by_channel.items()
         }
-    return data, None, dataset_plot
+    return unbinned_data, None, dataset_plot
 
 
 def _build_iteration_input(
