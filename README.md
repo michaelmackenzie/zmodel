@@ -36,32 +36,30 @@ pyenv rootana 2.5.0
 
 ## Usage
 
-User-facing tool scripts are organized under `scripts/`:
+User-facing tool tools are organized under `bin/`:
 
-- `scripts/zmodel` for build/load/analyze
-- `scripts/plot_analysis.py` for plotting from snapshots
-
-Compatibility wrappers remain at the repository root (`./zmodel` and `./plot_analysis.py`).
+- `bin/zmodel` for build/load/analyze
+- `bin/plot_analysis.py` for plotting from snapshots
 
 Build a model bundle from a text card. The default output is `model.pkl`, and observed data from the card is bundled when present:
 
 ```bash
-./bin/zmodel build examples/simple_model_card_example.txt
+zmodel build examples/simple_model_card_example.txt
 ```
 
 Load a saved model bundle. The summary includes the observed data count when it exists:
 
 ```bash
-./bin/zmodel load model.pkl
+zmodel load model.pkl
 ```
 
 Run an analysis. If the saved model contains observed data, `analyze` fits that data by default. Use `--toys N` to generate toy datasets, or `--toys -1` to run the exact binned Asimov mode for validation:
 
 ```bash
-./bin/zmodel analyze --model-file model.pkl
-./bin/zmodel analyze --model-file model.pkl --toys 10 --fit-mode auto --plot
-./bin/zmodel analyze --model-file model.pkl --toys -1
-./bin/zmodel analyze --model-file model.pkl --toys 50 --feldman-cousins 0.1 --fc-scan-points 31 --fc-toys 300 --fc-scan-max 5.0
+zmodel analyze --model-file model.pkl
+zmodel analyze --model-file model.pkl --toys 10 --fit-mode auto --plot
+zmodel analyze --model-file model.pkl --toys -1
+zmodel analyze --model-file model.pkl --toys -1 --feldman-cousins 0.1 --fc-scan-points 10 --fc-toys 50 --fc-scan-max 5.0
 ```
 
 Each analysis run now also writes an ensemble evaluation report in JSON format. By default the file is derived from `--output-pkl`, for example `analysis_output_ensemble_report.json`. Use `--report-file` to choose a custom path.
@@ -69,11 +67,10 @@ Each analysis run now also writes an ensemble evaluation report in JSON format. 
 Generate plots from a saved analysis snapshot:
 
 ```bash
-./bin/plot_analysis.py analysis_output.pkl --plot-dir plots_from_snapshot
+plot_analysis.py analysis_output.pkl --plot-dir plots_from_snapshot
 ```
 
 ## Notes
 
 - No user-specific file locations are required by default.
 - Input cards should use relative paths (recommended) or absolute paths to your own data files.
-- ROOT histogram loading utilities require explicit file and object paths; no hidden global path configuration is used.
