@@ -1,11 +1,8 @@
 import pickle
-
 import dill
 import zfit
 
-
 obs = zfit.Space("mass", limits=(100.0, 110.0))
-
 
 sig_mu = zfit.Parameter("sig_mu", 105.0, 103.0, 107.0)
 sig_mu_offset = zfit.Parameter("sig_mu_offset", 0.0, -1.0, 1.0)

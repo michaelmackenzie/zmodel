@@ -466,19 +466,15 @@ def get_nominal_rate(payload, process: str, card_rate: Optional[float]):
     return 1.0
 
 
-def _clip(value):
-    return znp.minimum(1.0, znp.maximum(-1.0, value))
-
-
 def make_shape_morphed_pdf(nominal_pdf, up_pdf, down_pdf, theta, name: str):
     frac_up = zfit.ComposedParameter(
         f"frac_up_{name}",
-        lambda t: znp.maximum(0.0, _clip(t)),
+        lambda t: znp.maximum(0.0, t),
         params=[theta],
     )
     frac_down = zfit.ComposedParameter(
         f"frac_down_{name}",
-        lambda t: znp.maximum(0.0, -_clip(t)),
+        lambda t: znp.maximum(0.0, -t),
         params=[theta],
     )
     return zfit.pdf.SumPDF(
@@ -515,12 +511,8 @@ def _kind_token(kind: str) -> str:
 def build_model_from_card(card: CardSpec, card_dir: str):
     term_names = []
     name_counts: Dict[str, int] = {}
-    multiple_channels = len(set(card.bin_names)) > 1
     for process, channel in zip(card.process_names, card.bin_names):
-        if multiple_channels:
-            base = f"{process}__{channel}"
-        else:
-            base = process
+        base = f"{process}__{channel}"
         safe_base = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in base)
         index = name_counts.get(safe_base, 0)
         name_counts[safe_base] = index + 1
@@ -632,7 +624,7 @@ def build_model_from_card(card: CardSpec, card_dir: str):
         kind = _kind_token(unc.kind)
 
         if kind in ("lnN", "gs"):
-            theta = zfit.Parameter(f"nuis_{unc.name}", 0.0, -5.0, 5.0)
+            theta = zfit.Parameter(f"nuis_{unc.name}", 0.0, -7.0, 7.0)
             constraints.append(
                 zfit.constraint.GaussianConstraint(
                     params=theta,
@@ -660,7 +652,7 @@ def build_model_from_card(card: CardSpec, card_dir: str):
                 rate_factors[term_name].append(factor)
             continue
 
-        theta = zfit.Parameter(f"nuis_shape_{unc.name}", 0.0, -1.0, 1.0)
+        theta = zfit.Parameter(f"nuis_shape_{unc.name}", 0.0, -7.0, 7.0)
         constraints.append(
             zfit.constraint.GaussianConstraint(
                 params=theta,
