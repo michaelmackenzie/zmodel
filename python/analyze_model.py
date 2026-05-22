@@ -129,6 +129,7 @@ def _save_analysis_snapshot(output_pkl, fit_model, summaries, args):
             "feldman_cousins_n_toys": args.fc_toys,
             "feldman_cousins_scan_max": args.fc_scan_max,
             "report_file": args.report_file,
+            "nll_scan_points": args.nll_scan_points,
             "set_parameters": args.set_parameters,
             "freeze_parameters": args.freeze_parameters,
             "set_parameter_ranges": args.set_parameter_ranges,
@@ -351,6 +352,7 @@ def _run_parallel_worker(task):
         existing_results=None,
         resume_from_index=start_index,
         compute_nll_scan=bool(task.get("compute_nll_scan", False)),
+        nll_scan_points=int(task.get("nll_scan_points", 121)),
     )
     return summaries
 
@@ -386,6 +388,8 @@ def run_analysis_cli(args):
     n_jobs = int(getattr(args, "jobs", 1) or 1)
     if n_jobs < 1:
         raise ValueError("--jobs must be >= 1")
+    if int(args.nll_scan_points) < 3:
+        raise ValueError("--nll-scan-points must be >= 3")
 
     configure_runtime(args.graph_mode, fit_model, n_toys)
     total_start = time.perf_counter()
@@ -413,6 +417,7 @@ def run_analysis_cli(args):
                     "feldman_cousins_n_toys": int(args.fc_toys),
                     "feldman_cousins_scan_max": args.fc_scan_max,
                     "compute_nll_scan": bool(args.plot),
+                    "nll_scan_points": int(args.nll_scan_points),
                 }
                 mismatches = _checkpoint_mismatches(checkpoint, expected_checkpoint_config)
                 if mismatches:
@@ -479,6 +484,7 @@ def run_analysis_cli(args):
                         "fc_toys": int(args.fc_toys),
                         "fc_scan_max": args.fc_scan_max,
                         "compute_nll_scan": bool(args.plot and start_index == 0),
+                        "nll_scan_points": int(args.nll_scan_points),
                     }
                 )
 
@@ -527,6 +533,7 @@ def run_analysis_cli(args):
                 existing_results=existing_results,
                 resume_from_index=resume_from_index,
                 compute_nll_scan=args.plot,
+                nll_scan_points=args.nll_scan_points,
             )
         total_time_s = time.perf_counter() - total_start
     else:

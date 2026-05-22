@@ -188,11 +188,62 @@ def _component_curve_by_channel(fit_model, x_plot, bin_width, channel):
     return total, signal, background
 
 
-def _poisson_one_sigma_band(expected_counts):
-    expected = np.asarray(expected_counts, dtype=float)
-    sigma = np.sqrt(np.maximum(expected, 0.0))
-    lower = np.maximum(expected - sigma, 0.0)
-    upper = expected + sigma
+def _parameter_shifted_value(param, delta):
+    value = float(param.value()) + float(delta)
+    lower = getattr(param, "lower", None)
+    upper = getattr(param, "upper", None)
+    if lower is not None and np.isfinite(float(lower)):
+        value = max(value, float(lower))
+    if upper is not None and np.isfinite(float(upper)):
+        value = min(value, float(upper))
+    return value
+
+
+def _hessian_model_band(fit_model, fit_param_hesse, nominal_values, evaluate_total):
+    if not fit_param_hesse:
+        return None, None
+
+    variance_up = np.zeros_like(nominal_values, dtype=float)
+    variance_down = np.zeros_like(nominal_values, dtype=float)
+    baseline_values = _capture_fit_model_parameter_values(fit_model)
+    try:
+        for param_name, sigma in fit_param_hesse.items():
+            if not np.isfinite(float(sigma)) or float(sigma) <= 0.0:
+                continue
+
+            param = _find_parameter_by_name(fit_model, param_name)
+            if param is None or not hasattr(param, "set_value"):
+                continue
+
+            base_value = float(param.value())
+            up_value = _parameter_shifted_value(param, float(sigma))
+            down_value = _parameter_shifted_value(param, -float(sigma))
+            if up_value == base_value and down_value == base_value:
+                continue
+
+            param.set_value(up_value)
+            up_values = np.asarray(evaluate_total(), dtype=float)
+
+            param.set_value(down_value)
+            down_values = np.asarray(evaluate_total(), dtype=float)
+
+            up_delta = np.maximum(up_values - nominal_values, 0.0)
+            up_delta = np.maximum(up_delta, nominal_values - down_values)
+
+            down_delta = np.maximum(nominal_values - up_values, 0.0)
+            down_delta = np.maximum(down_delta, down_values - nominal_values)
+
+            variance_up = variance_up + np.square(up_delta)
+            variance_down = variance_down + np.square(down_delta)
+
+            param.set_value(base_value)
+    finally:
+        _restore_parameter_values(baseline_values)
+
+    sigma_up = np.sqrt(np.maximum(variance_up, 0.0))
+    sigma_down = np.sqrt(np.maximum(variance_down, 0.0))
+    lower = np.maximum(nominal_values - sigma_down, 0.0)
+    upper = nominal_values + sigma_up
     return lower, upper
 
 
@@ -211,6 +262,7 @@ def plot_dataset_and_components(summary, fit_model, plot_dir, binned_bins):
     dataset_id = _summary_dataset_id(summary)
 
     fit_params = summary.get("fit_params", {})
+    fit_param_hesse = summary.get("fit_param_hesse", {})
     baseline_values = _capture_fit_model_parameter_values(fit_model)
     _restore_fit_params_by_name(fit_model, fit_params)
 
@@ -267,17 +319,23 @@ def plot_dataset_and_components(summary, fit_model, plot_dir, binned_bins):
                 if not np.any(total_counts):
                     total_counts = np.asarray(summary.get("total_model_counts", []), dtype=float)
                 if total_counts.size:
-                    band_low, band_high = _poisson_one_sigma_band(total_counts)
-                    ax.fill_between(
-                        edges[:-1],
-                        band_low,
-                        band_high,
-                        step="post",
-                        color="gray",
-                        alpha=0.25,
-                        linewidth=0.0,
-                        label=r"Total model $\pm 1\sigma$",
+                    band_low, band_high = _hessian_model_band(
+                        fit_model,
+                        fit_param_hesse,
+                        total_counts,
+                        lambda: _component_counts_by_channel(fit_model, edges, category)[0],
                     )
+                    if band_low is not None and band_high is not None:
+                        ax.fill_between(
+                            edges[:-1],
+                            band_low,
+                            band_high,
+                            step="post",
+                            color="gray",
+                            alpha=0.25,
+                            linewidth=0.0,
+                            label=r"Total model $\pm 1\sigma$",
+                        )
                     ax.step(edges[:-1], total_counts, where="post", color="black", linewidth=1.8, label="Total model")
                 if bkg_counts.size:
                     ax.step(edges[:-1], bkg_counts, where="post", color="tab:blue", linestyle="--", linewidth=1.6, label="Total background")
@@ -326,21 +384,27 @@ def plot_dataset_and_components(summary, fit_model, plot_dir, binned_bins):
                 )
 
                 bin_width = float(edges[1] - edges[0]) if len(edges) > 1 else 1.0
-                n_curve = max(400, int(binned_bins) * 20)
+                n_curve = max(400, int(binned_bins) * 5)
                 x_curve = np.linspace(float(lower), float(upper), n_curve)
 
                 total_y, sig_y, bkg_y = _component_curve_by_channel(fit_model, x_curve, bin_width, category)
                 if np.any(total_y):
-                    band_low, band_high = _poisson_one_sigma_band(total_y)
-                    ax.fill_between(
-                        x_curve,
-                        band_low,
-                        band_high,
-                        color="gray",
-                        alpha=0.25,
-                        linewidth=0.0,
-                        label=r"Total model $\pm 1\sigma$",
+                    band_low, band_high = _hessian_model_band(
+                        fit_model,
+                        fit_param_hesse,
+                        total_y,
+                        lambda: _component_curve_by_channel(fit_model, x_curve, bin_width, category)[0],
                     )
+                    if band_low is not None and band_high is not None:
+                        ax.fill_between(
+                            x_curve,
+                            band_low,
+                            band_high,
+                            color="gray",
+                            alpha=0.25,
+                            linewidth=0.0,
+                            label=r"Total model $\pm 1\sigma$",
+                        )
                     ax.plot(x_curve, total_y, color="black", linewidth=1.8, label="Total model")
                 if np.any(sig_y):
                     ax.plot(x_curve, sig_y, color="tab:red", linestyle="-.", linewidth=1.6, label="Signal")

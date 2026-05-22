@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import importlib
 import pathlib
 import sys
 
@@ -8,6 +9,26 @@ REPO_ROOT = pathlib.Path(__file__).resolve().parent.parent
 REPO_PARENT = REPO_ROOT.parent
 if str(REPO_PARENT) not in sys.path:
     sys.path.insert(0, str(REPO_PARENT))
+
+
+def _package_version(module_name, fallback="unknown"):
+    try:
+        module = importlib.import_module(module_name)
+    except Exception:
+        return fallback
+    return getattr(module, "__version__", fallback)
+
+
+def _print_startup_header():
+    from zmodel import __version__ as zmodel_version
+
+    zfit_version = _package_version("zfit")
+    hepstats_version = _package_version("hepstats")
+    version_string = f"* zmodel {zmodel_version} | zfit {zfit_version} | hepstats {hepstats_version} *"
+    print('*' * len(version_string), flush=True)
+    print('*' + 'zmodel statistical analysis'.center(len(version_string) - 2) + '*', flush=True)
+    print(version_string, flush=True)
+    print('*' * len(version_string), flush=True)
 
 
 def _add_analyze_arguments(parser):
@@ -128,6 +149,12 @@ def _add_analyze_arguments(parser):
         help="Save histogram plots of fit parameters, POI pull, and per-toy fit distributions",
     )
     parser.add_argument(
+        "--nll-scan-points",
+        type=int,
+        default=121,
+        help="Number of points in the profile-NLL scan used for --plot (default: 121)",
+    )
+    parser.add_argument(
         "--plot-dir",
         type=str,
         default="plots",
@@ -196,6 +223,7 @@ def build_parser():
 def main():
     parser = build_parser()
     args = parser.parse_args()
+    _print_startup_header()
 
 
     if args.command == "build":

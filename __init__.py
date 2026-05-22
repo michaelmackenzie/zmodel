@@ -4,6 +4,8 @@ This package exposes modules stored in the local python/ directory so users can
 import with names like `zmodel.functions` while keeping CLI scripts separate.
 """
 
+__version__ = "dev"
+
 from pathlib import Path
 import sys
 

@@ -617,7 +617,7 @@ def _run_profile_scan_for_loss(loss, poi_param, fit_model, poi_scan_points=41, p
     }
 
 
-def _compute_nll_scan_for_plot(loss, minimizer, poi_param, poi_unc, fit_model, poi_scan_max=None, n_points=51):
+def _compute_nll_scan_for_plot(loss, minimizer, poi_param, poi_unc, fit_model, poi_scan_max=None, n_points=121):
     """Profile-likelihood scan of the POI for plotting purposes.
 
     Scans the POI from (best_fit - 5*sigma) to (best_fit + 5*sigma),
@@ -661,18 +661,32 @@ def _compute_nll_scan_for_plot(loss, minimizer, poi_param, poi_unc, fit_model, p
     bestfit_values = _capture_fit_model_parameter_values(fit_model)
     was_floating = getattr(poi_param, "floating", True)
 
-    nll_values = []
+    nll_values = np.full(int(n_points), np.nan, dtype=float)
     try:
         poi_param.floating = False
-        for v in scan_values:
-            # Reset all floating nuisance parameters to their best-fit values before each scan point
-            for param in _all_params(fit_model):
-                if param is not poi_param and getattr(param, "floating", False):
-                    if hasattr(param, "set_value") and param in bestfit_values:
-                        param.set_value(bestfit_values[param])
-            poi_param.set_value(float(v))
+
+        # Start from the point nearest the global best-fit value and profile
+        # outward in both directions using warm starts to reduce scan artifacts.
+        center_idx = int(np.argmin(np.abs(scan_values - poi_best_fit)))
+
+        _restore_parameter_values(bestfit_values)
+        poi_param.set_value(float(scan_values[center_idx]))
+        minimizer.minimize(loss)
+        nll_values[center_idx] = float(loss.value())
+
+        for idx in range(center_idx + 1, len(scan_values)):
+            poi_param.set_value(float(scan_values[idx]))
             minimizer.minimize(loss)
-            nll_values.append(float(loss.value()))
+            nll_values[idx] = float(loss.value())
+
+        _restore_parameter_values(bestfit_values)
+        poi_param.set_value(float(scan_values[center_idx]))
+        minimizer.minimize(loss)
+        nll_values[center_idx] = float(loss.value())
+        for idx in range(center_idx - 1, -1, -1):
+            poi_param.set_value(float(scan_values[idx]))
+            minimizer.minimize(loss)
+            nll_values[idx] = float(loss.value())
     except Exception:
         return None
     finally:
@@ -701,6 +715,30 @@ def _extract_hesse_error(result, poi_param):
     if error is None:
         return None
     return float(error)
+
+
+def _extract_fit_parameter_hesse_errors(fit_result):
+    params = [param for param in fit_result.params.keys() if getattr(param, "floating", False)]
+    if not params:
+        return {}
+
+    try:
+        hesse = fit_result.hesse(params=params)
+    except Exception:
+        return {}
+
+    errors = {}
+    for param in params:
+        entry = hesse.get(param)
+        if not isinstance(entry, dict):
+            continue
+        error = entry.get("error")
+        if error is None:
+            continue
+        error = float(error)
+        if np.isfinite(error) and error > 0.0:
+            errors[param.name] = error
+    return errors
 
 
 def _extract_fit_parameter_values(fit_result):
@@ -864,6 +902,7 @@ def _build_fit_summary(
             "poi_fit": float(poi_param.value()),
             "poi_unc_hesse": _extract_hesse_error(fit_result, poi_param),
             "fit_params": _extract_fit_parameter_values(fit_result),
+            "fit_param_hesse": _extract_fit_parameter_hesse_errors(fit_result),
         }
 
     result = minimizer.minimize(loss)
@@ -876,6 +915,7 @@ def _build_fit_summary(
         "poi_fit": float(poi_param.value()),
         "poi_unc_hesse": _extract_hesse_error(result, poi_param),
         "fit_params": _extract_fit_parameter_values(result),
+        "fit_param_hesse": _extract_fit_parameter_hesse_errors(result),
     }
 
 
@@ -1087,6 +1127,7 @@ def _run_single(
     feldman_cousins_n_toys,
     feldman_cousins_scan_max,
     compute_nll_scan,
+    nll_scan_points,
 ):
     start_time = time.perf_counter()
     _restore_parameter_values(starting_values)
@@ -1136,6 +1177,7 @@ def _run_single(
             poi_unc=summary.get("poi_unc_hesse"),
             fit_model=fit_model,
             poi_scan_max=poi_scan_max,
+            n_points=nll_scan_points,
         )
         if nll_scan is not None:
             summary["nll_scan"] = nll_scan
@@ -1211,6 +1253,7 @@ def run_analysis(
     existing_results=None,
     resume_from_index=0,
     compute_nll_scan=False,
+    nll_scan_points=121,
 ):
     resolved_fit_mode = _resolve_fit_mode(fit_mode, fit_model)
     is_counting = is_likely_counting_model(fit_model)
@@ -1241,6 +1284,8 @@ def run_analysis(
 
     if checkpoint_freq is not None and checkpoint_freq < 1:
         raise ValueError("checkpoint_freq must be >= 1")
+    if int(nll_scan_points) < 3:
+        raise ValueError("nll_scan_points must be >= 3")
 
     data_mode = _resolve_data_mode(use_observed_data, use_asimov_data)
     resume_index = int(resume_from_index)
@@ -1273,6 +1318,7 @@ def run_analysis(
             feldman_cousins_n_toys=feldman_cousins_n_toys,
             feldman_cousins_scan_max=feldman_cousins_scan_max,
             compute_nll_scan=(sample_index == 0 and compute_nll_scan),
+            nll_scan_points=int(nll_scan_points),
         )
 
         summaries.append(summary)
@@ -1302,6 +1348,7 @@ def run_analysis(
                     "feldman_cousins_n_toys": int(feldman_cousins_n_toys),
                     "feldman_cousins_scan_max": feldman_cousins_scan_max,
                     "compute_nll_scan": bool(compute_nll_scan),
+                    "nll_scan_points": int(nll_scan_points),
                 }
                 with open(checkpoint_path, "wb") as f:
                     dill.dump(checkpoint_data, f)
