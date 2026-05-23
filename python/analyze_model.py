@@ -3,9 +3,10 @@ import json
 import multiprocessing as mp
 import os
 import time
+import warnings
 
 # Reduce TensorFlow C++ logging noise before zfit/tensorflow import.
-os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
 os.environ.setdefault("TF_ENABLE_ONEDNN_OPTS", "0")
 os.environ.setdefault("TF_CPP_MIN_VLOG_LEVEL", "3")
 os.environ.setdefault("AUTOGRAPH_VERBOSITY", "0")
@@ -35,6 +36,27 @@ try:
 except Exception:
     pass
 
+# Suppress known non-fatal runtime warnings that clutter command-line output.
+warnings.filterwarnings(
+    "ignore",
+    message=r"Called analytic integral to test if available, but unknown error occured:.*",
+    category=UserWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"Flow currently not fully supported\. Values outside the edges are all 0\.",
+    category=UserWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"Exception occurred, parameter values are not reset and in an arbitrary, last used state\..*",
+    category=RuntimeWarning,
+)
+warnings.filterwarnings(
+    "ignore",
+    message=r"This SumPDF is built with fracs .* and all pdf are extended:.*",
+)
+
 
 def _load_analysis_model(model_file=None, input_card=None):
     if model_file is not None:
@@ -50,7 +72,12 @@ def _print_dataset_summary(summary, is_observed_fit=False):
     poi_fit = summary.get("poi_fit")
     poi_unc = summary.get("poi_unc_hesse")
     fit_text = f"{poi_fit:.3g}" if poi_fit is not None else "n/a"
-    unc_text = f"{poi_unc:.3g}" if poi_unc is not None else "n/a"
+    if poi_unc is None:
+        unc_text = "n/a"
+    elif np.isfinite(float(poi_unc)):
+        unc_text = f"{poi_unc:.3g}"
+    else:
+        unc_text = "unconstrained"
     status_text = "valid" if summary['valid'] else "invalid"
     if summary.get("asimov_fit") or summary.get("dataset_plot", {}).get("asimov"):
         label = "Asimov data"

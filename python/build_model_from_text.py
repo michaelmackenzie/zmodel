@@ -499,7 +499,35 @@ def get_nominal_rate(payload, process: str, card_rate: Optional[float]):
     return 1.0
 
 
+def _to_nonextended_pdf(pdf):
+    if bool(getattr(pdf, "is_extended", False)):
+        if hasattr(pdf, "to_binneddata"):
+            try:
+                data = pdf.to_binneddata()
+                return zfit.pdf.HistogramPDF(data=data, extended=False, name=f"{pdf.name}_base")
+            except Exception:
+                pass
+
+        if hasattr(pdf, "pdf"):
+            try:
+                inner = pdf.pdf
+            except Exception:
+                inner = None
+            if inner is not None:
+                return inner
+
+    return pdf
+
+
 def make_shape_morphed_pdf(nominal_pdf, up_pdf, down_pdf, theta, name: str):
+    nominal_pdf = _to_nonextended_pdf(nominal_pdf)
+    up_pdf = _to_nonextended_pdf(up_pdf)
+    down_pdf = _to_nonextended_pdf(down_pdf)
+
+    components = [up_pdf, down_pdf, nominal_pdf]
+    if all(isinstance(pdf, zfit.core.binnedpdf.BaseBinnedPDF) for pdf in components):
+        components = [zfit.pdf.UnbinnedFromBinnedPDF(pdf) for pdf in components]
+
     frac_up = zfit.ComposedParameter(
         f"frac_up_{name}",
         lambda t: znp.maximum(0.0, t),
@@ -510,8 +538,9 @@ def make_shape_morphed_pdf(nominal_pdf, up_pdf, down_pdf, theta, name: str):
         lambda t: znp.maximum(0.0, -t),
         params=[theta],
     )
+
     return zfit.pdf.SumPDF(
-        [up_pdf, down_pdf, nominal_pdf],
+        components,
         fracs=[frac_up, frac_down],
         name=f"shape_morph_{name}",
     )
@@ -571,6 +600,49 @@ def _create_extended_pdf(pdf, yield_param, name_suffix: str = "_ext"):
     raise ValueError(
         f"Could not create an extended PDF for '{getattr(pdf, 'name', type(pdf).__name__)}'"
     )
+
+
+def _build_extended_sum_model(term_names, shapes, yields, model_name: str):
+    if not term_names:
+        raise ValueError(f"No terms available to build model '{model_name}'")
+
+    if len(term_names) == 1:
+        term = term_names[0]
+        return _create_extended_pdf(_to_nonextended_pdf(shapes[term]), yields[term], name_suffix=f"_{model_name}_ext")
+
+    yield_params = [yields[term] for term in term_names]
+    total_yield = zfit.ComposedParameter(
+        f"yield_{model_name}",
+        lambda *vals: znp.sum(znp.stack(vals)),
+        params=yield_params,
+    )
+
+    fracs = []
+    for term in term_names[:-1]:
+        frac = zfit.ComposedParameter(
+            f"frac_{model_name}_{term}",
+            lambda y, ytot: znp.where(ytot > 0.0, y / ytot, 0.0),
+            params=[yields[term], total_yield],
+        )
+        fracs.append(frac)
+
+    components = [_to_nonextended_pdf(shapes[term]) for term in term_names]
+    has_binned = any(isinstance(pdf, zfit.core.binnedpdf.BaseBinnedPDF) for pdf in components)
+    has_unbinned = any(not isinstance(pdf, zfit.core.binnedpdf.BaseBinnedPDF) for pdf in components)
+    if has_binned and has_unbinned:
+        components = [
+            zfit.pdf.UnbinnedFromBinnedPDF(pdf)
+            if isinstance(pdf, zfit.core.binnedpdf.BaseBinnedPDF)
+            else pdf
+            for pdf in components
+        ]
+
+    base_pdf = zfit.pdf.SumPDF(
+        components,
+        fracs=fracs,
+        name=f"{model_name}_shape",
+    )
+    return _create_extended_pdf(base_pdf, total_yield, name_suffix="_ext")
 
 
 def _kind_token(kind: str) -> str:
@@ -806,23 +878,22 @@ def build_model_from_card(card: CardSpec, card_dir: str):
             name=f"yield_{term_name}",
         )
 
-    extended_pdfs = {
-        term_name: _create_extended_pdf(shapes[term_name], yields[term_name])
-        for term_name in term_names
-    }
-
-    channel_extended = {channel: [] for channel in card.channels}
-    for term_name, channel in term_channels.items():
-        channel_extended[channel].append(extended_pdfs[term_name])
+    # Keep per-term shape objects unmodified here; model assembly below creates
+    # properly-extended aggregate PDFs. Mutating shapes in-place to extended
+    # PDFs can alter downstream composition behavior.
+    extended_pdfs = dict(shapes)
 
     channel_models: Dict[str, zfit.pdf.BasePDF] = {}
-    for channel, pdfs in channel_extended.items():
-        if not pdfs:
+    for channel in card.channels:
+        channel_terms = [term for term in term_names if term_channels.get(term) == channel]
+        if not channel_terms:
             continue
-        if len(pdfs) == 1:
-            channel_models[channel] = pdfs[0]
-        else:
-            channel_models[channel] = zfit.pdf.SumPDF(pdfs, name=f"model_{channel}")
+        channel_models[channel] = _build_extended_sum_model(
+            channel_terms,
+            shapes,
+            yields,
+            model_name=f"model_{channel}",
+        )
 
     model_name = f"model_{card.category}" if len(card.channels) == 1 else "model_combined"
     mixed_channel_observables = False
@@ -834,7 +905,12 @@ def build_model_from_card(card: CardSpec, card_dir: str):
             for channel in channel_models
         }
         if len(signatures) == 1:
-            model = zfit.pdf.SumPDF(list(extended_pdfs.values()), name=model_name)
+            model = _build_extended_sum_model(
+                term_names,
+                shapes,
+                yields,
+                model_name=model_name,
+            )
         else:
             mixed_channel_observables = True
             # No single-space aggregate model exists for mixed-observable categories.
@@ -859,14 +935,28 @@ def build_model_from_card(card: CardSpec, card_dir: str):
             )
         )
 
-    signal_name = next((name for name, proc_id in process_id_map.items() if proc_id <= 0), None)
+    signal_label = next((name for name, proc_id in process_id_map.items() if proc_id <= 0), None)
+    signal_name = signal_label
+
+    # For shape models, yields are keyed by per-term names (process__channel).
+    # Keep signal_process aligned with those keys when the raw process label does
+    # not directly exist in yields (common for converted RooWorkspace cards).
+    if signal_name is not None and signal_name not in yields:
+        matching_terms = [
+            term_name
+            for term_name, process in zip(term_names, card.process_names)
+            if process == signal_name
+        ]
+        if len(matching_terms) == 1:
+            signal_name = matching_terms[0]
+
     signal_nominal_yield = None
-    if signal_name is not None:
+    if signal_label is not None:
         signal_nominal_yield = float(
             sum(
                 nominal_rates[term_name]
                 for term_name, process in zip(term_names, card.process_names)
-                if process == signal_name
+                if process == signal_label
             )
         )
 

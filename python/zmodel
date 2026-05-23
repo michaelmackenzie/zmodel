@@ -213,6 +213,13 @@ def build_parser():
 
     load_parser = subparsers.add_parser("load", help="Load and summarize a saved model bundle")
     load_parser.add_argument("model_file", help="Path to the saved model file")
+    load_parser.add_argument(
+        "-v",
+        "--verbose",
+        action="count",
+        default=0,
+        help="Increase load output detail; use -vv for PDF and variable listings",
+    )
 
     analyze_parser = subparsers.add_parser("analyze", help="Run toy fits and optional CLs limits")
     _add_analyze_arguments(analyze_parser)
@@ -234,16 +241,24 @@ def main():
 
     if args.command == "load":
         from zmodel.load_model import load_and_summarize_model
-        summary = load_and_summarize_model(args.model_file)
+        summary = load_and_summarize_model(args.model_file, verbose=args.verbose)
         print(f"Loaded model from {summary['model_path']}")
         print(f"Model name: {summary['model_name']}")
         print(f"Observable range: {summary['obs_range']}")
+        if summary.get("channels"):
+            print(f"Channels: {', '.join(summary['channels'])}")
         print(f"Processes: {summary['processes']}")
         print(f"Signal process: {summary['signal_process']}")
+        if summary.get("poi_name") is not None:
+            print(f"POI name: {summary['poi_name']}")
         print(f"Constraints: {summary['constraints']}")
         print(f"Floating params: {summary['floating_params']}")
         if summary.get("observed_count") is not None:
             print(f"Observed data count: {summary['observed_count']}")
+        if summary.get("pdf_lines"):
+            print("PDFs and variables:")
+            for line in summary["pdf_lines"]:
+                print(line)
         return
 
     if args.command == "analyze":

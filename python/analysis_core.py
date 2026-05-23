@@ -150,12 +150,94 @@ def _build_channel_binned_models(fit_model, channel_binned_spaces):
 
 
 def _make_binned_toy_data(model, binned_space):
+    edges = _binning_edges_as_float_array(binned_space.binning)
+
+    # Binned PDFs in zfit expect integer/None n in sample(); passing "auto"
+    # triggers a TF cast error. Build toys from expected per-bin counts.
+    is_binned_model = isinstance(model, zfit.core.binnedpdf.BaseBinnedPDF)
+    if is_binned_model:
+        try:
+            expected_counts = np.asarray(model.values(), dtype=float).reshape(-1)
+        except Exception:
+            rel_counts = np.asarray(model.rel_counts(model.space), dtype=float).reshape(-1)
+            total_yield = 1.0
+            get_yield = getattr(model, "get_yield", None)
+            if callable(get_yield):
+                try:
+                    total_yield = float(get_yield().value())
+                except Exception:
+                    total_yield = 1.0
+            expected_counts = rel_counts * total_yield
+        expected_counts = np.clip(
+            np.nan_to_num(expected_counts, nan=0.0, posinf=0.0, neginf=0.0),
+            0.0,
+            None,
+        )
+        counts = np.random.poisson(expected_counts).astype(float)
+        centers = 0.5 * (edges[:-1] + edges[1:])
+        values = np.repeat(centers, counts.astype(int)).astype(float)
+        data = zfit.data.BinnedData.from_tensor(space=binned_space, values=counts)
+        return data, values, edges, counts
+
     sample = model.sample(n="auto")
     values = np.asarray(sample.value(), dtype=float).reshape(-1)
-    edges = _binning_edges_as_float_array(binned_space.binning)
     counts, _ = np.histogram(values, bins=edges)
     data = zfit.data.BinnedData.from_tensor(space=binned_space, values=counts.astype(float))
     return data, values, edges, counts.astype(float)
+
+
+def _guess_binned_space_for_model(fit_model, model, channel=None, bins=40):
+    data = getattr(fit_model, "data", None)
+    if channel is not None and isinstance(data, dict):
+        native = _native_binned_space_from_data(data.get(channel))
+        if native is not None:
+            return native
+    else:
+        native = _native_binned_space_from_data(data)
+        if native is not None:
+            return native
+
+    model_space = getattr(model, "space", None)
+    if model_space is not None and getattr(model_space, "binned", False):
+        return model_space
+
+    if channel is not None:
+        channel_obs = (getattr(fit_model, "channel_obs", {}) or {}).get(channel)
+        if channel_obs is not None and getattr(channel_obs, "binned", False):
+            return channel_obs
+
+    low, high = None, None
+    if channel is not None:
+        channel_ranges = getattr(fit_model, "channel_obs_ranges", {}) or {}
+        if channel in channel_ranges:
+            low, high = channel_ranges[channel]
+    if low is None or high is None:
+        low, high = getattr(fit_model, "obs_range", (0.0, 1.0))
+
+    obs_name = "obs"
+    obs_names = getattr(model_space, "obs", None)
+    if obs_names:
+        obs_name = obs_names[0]
+    edges = np.linspace(float(low), float(high), int(bins) + 1)
+    return zfit.Space(obs_name, binning=zfit.binned.VariableBinning(edges, name=obs_name))
+
+
+def _make_unbinned_toy_data_from_binned_model(fit_model, model, channel=None, bins=40):
+    binned_space = _guess_binned_space_for_model(fit_model, model, channel=channel, bins=bins)
+    if hasattr(model, "to_binned"):
+        binned_model = model.to_binned(binned_space)
+    else:
+        binned_model = model
+
+    expected_counts = np.asarray(binned_model.values(), dtype=float).reshape(-1)
+    expected_counts = np.clip(np.nan_to_num(expected_counts, nan=0.0, posinf=0.0, neginf=0.0), 0.0, None)
+    toy_counts = np.random.poisson(expected_counts).astype(float)
+
+    edges = _binning_edges_as_float_array(binned_space.binning)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    values = np.repeat(centers, toy_counts.astype(int))
+    unbinned_data = _values_to_unbinned_dataset(values, getattr(model, "space", None))
+    return unbinned_data, values.astype(float), edges, toy_counts
 
 
 def _channel_models(fit_model):
@@ -169,38 +251,106 @@ def _all_models(fit_model):
     return [fit_model.model]
 
 
+def _resolve_process_key(process_map, process_name):
+    if not process_map or process_name is None:
+        return None
+
+    if process_name in process_map:
+        return process_name
+
+    suffixed = [name for name in process_map if name.startswith(f"{process_name}__")]
+    if len(suffixed) == 1:
+        return suffixed[0]
+
+    if "__" in process_name:
+        base_name = process_name.split("__", 1)[0]
+        if base_name in process_map:
+            return base_name
+
+    return None
+
+
 def _all_params(fit_model):
     params = []
     seen = set()
+
+    def _iter_child_params(param):
+        children = getattr(param, "params", None)
+        if children is None:
+            return
+        if isinstance(children, dict):
+            iterable = children.values()
+        else:
+            iterable = children
+        for child in iterable:
+            candidate = child
+            if isinstance(child, tuple) and len(child) >= 2:
+                candidate = child[1]
+            if hasattr(candidate, "value"):
+                yield candidate
+
+    def _collect(param):
+        ident = id(param)
+        if ident in seen:
+            return
+        seen.add(ident)
+        params.append(param)
+        for child in _iter_child_params(param):
+            _collect(child)
+
     for model in _all_models(fit_model):
-        for param in model.get_params():
-            ident = id(param)
-            if ident in seen:
+        for kwargs in ({}, {"floating": None}, {"floating": None, "is_yield": None}):
+            try:
+                model_params = list(model.get_params(**kwargs))
+            except Exception:
                 continue
-            seen.add(ident)
-            params.append(param)
+            for param in model_params:
+                _collect(param)
+
+    for param in (getattr(fit_model, "yields", {}) or {}).values():
+        if hasattr(param, "value"):
+            _collect(param)
+
     return params
 
 
 def _capture_fit_model_parameter_values(fit_model):
     values = {}
     for param in _all_params(fit_model):
-        if hasattr(param, "set_value"):
+        if not hasattr(param, "set_value"):
+            continue
+        try:
             values[param] = float(param.value())
+        except Exception:
+            # Some composed parameters are not directly settable/restorable.
+            continue
     return values
 
 
 def _capture_parameter_values(model):
     values = {}
-    for param in model.get_params():
-        if hasattr(param, "set_value"):
-            values[param] = float(param.value())
+    for kwargs in ({}, {"floating": None}, {"floating": None, "is_yield": None}):
+        try:
+            params = list(model.get_params(**kwargs))
+        except Exception:
+            continue
+        for param in params:
+            if not hasattr(param, "set_value"):
+                continue
+            try:
+                values[param] = float(param.value())
+            except Exception:
+                continue
     return values
 
 
 def _restore_parameter_values(saved_values):
     for param, value in saved_values.items():
-        param.set_value(value)
+        try:
+            param.set_value(value)
+        except Exception:
+            # Skip parameters that cannot be set directly (e.g. composed params).
+            continue
 
 
 def _find_signal_parameter(fit_model):
@@ -214,8 +364,10 @@ def _find_signal_parameter(fit_model):
         if param.name.startswith("mu_"):
             return param
 
-    if fit_model.signal_process and fit_model.signal_process in fit_model.yields:
-        return fit_model.yields[fit_model.signal_process]
+    if fit_model.signal_process and getattr(fit_model, "yields", None):
+        matched_key = _resolve_process_key(fit_model.yields, fit_model.signal_process)
+        if matched_key is not None:
+            return fit_model.yields[matched_key]
 
     return None
 
@@ -451,9 +603,17 @@ def _build_toy_data(fit_model, resolved_fit_mode, binned_space, is_counting):
         channel_data = {}
         channel_values = {}
         for channel, model in channel_models.items():
-            sample = model.sample(n="auto")
-            values = np.asarray(sample.value(), dtype=float).reshape(-1)
-            channel_data[channel] = sample
+            try:
+                sample = model.sample(n="auto")
+                values = np.asarray(sample.value(), dtype=float).reshape(-1)
+                channel_data[channel] = sample
+            except Exception:
+                sample, values, _edges, _counts = _make_unbinned_toy_data_from_binned_model(
+                    fit_model,
+                    model,
+                    channel=channel,
+                )
+                channel_data[channel] = sample
             channel_values[channel] = values
         dataset_plot = {"mode": "unbinned", "channel_values": channel_values}
         return channel_data, None, dataset_plot
@@ -487,8 +647,14 @@ def _build_toy_data(fit_model, resolved_fit_mode, binned_space, is_counting):
         }
         return data, None, dataset_plot
 
-    data = fit_model.model.sample(n="auto")
-    values = np.asarray(data.value(), dtype=float).reshape(-1)
+    try:
+        data = fit_model.model.sample(n="auto")
+        values = np.asarray(data.value(), dtype=float).reshape(-1)
+    except Exception:
+        data, values, _edges, _counts = _make_unbinned_toy_data_from_binned_model(
+            fit_model,
+            fit_model.model,
+        )
     dataset_plot = {"mode": "unbinned", "values": values}
     return data, None, dataset_plot
 
@@ -758,6 +924,73 @@ def _extract_hesse_error(result, poi_param):
     return float(error)
 
 
+def _estimate_poi_uncertainty_from_profile(loss, minimizer, poi_param, fit_model):
+    scan = _compute_nll_scan_for_plot(
+        loss=loss,
+        minimizer=minimizer,
+        poi_param=poi_param,
+        poi_unc=None,
+        fit_model=fit_model,
+        n_points=41,
+    )
+    if not isinstance(scan, dict):
+        return None
+
+    x = np.asarray(scan.get("poi_values", []), dtype=float)
+    y = np.asarray(scan.get("delta_nll_values", []), dtype=float)
+    if x.size < 5 or y.size != x.size:
+        return None
+
+    finite = np.isfinite(x) & np.isfinite(y)
+    x = x[finite]
+    y = y[finite]
+    if x.size < 5:
+        return None
+
+    # A completely flat profile means the POI is unconstrained in this fit.
+    if np.nanmax(y) < target:
+        return float("inf")
+
+    best_idx = int(np.argmin(y))
+    target = 0.5
+
+    def _crossing(xseg, yseg):
+        if xseg.size < 2:
+            return None
+        for i in range(xseg.size - 1):
+            y0, y1 = yseg[i], yseg[i + 1]
+            if (y0 - target) == 0.0:
+                return float(xseg[i])
+            if (y0 - target) * (y1 - target) <= 0.0:
+                if y1 == y0:
+                    return float(0.5 * (xseg[i] + xseg[i + 1]))
+                t = (target - y0) / (y1 - y0)
+                return float(xseg[i] + t * (xseg[i + 1] - xseg[i]))
+        return None
+
+    x_left = x[: best_idx + 1][::-1]
+    y_left = y[: best_idx + 1][::-1]
+    x_right = x[best_idx:]
+    y_right = y[best_idx:]
+
+    left_cross = _crossing(x_left, y_left)
+    right_cross = _crossing(x_right, y_right)
+    center = float(x[best_idx])
+
+    candidates = []
+    if left_cross is not None:
+        candidates.append(center - left_cross)
+    if right_cross is not None:
+        candidates.append(right_cross - center)
+    if not candidates:
+        return None
+
+    unc = float(np.nanmean(np.asarray(candidates, dtype=float)))
+    if np.isfinite(unc) and unc > 0.0:
+        return unc
+    return None
+
+
 def _extract_fit_parameter_hesse_errors(fit_result):
     params = [param for param in fit_result.params.keys() if getattr(param, "floating", False)]
     if not params:
@@ -995,6 +1228,9 @@ def _build_fit_summary(
         }
 
     result = minimizer.minimize(loss)
+    poi_unc = _extract_hesse_error(result, poi_param)
+    if poi_unc is None:
+        poi_unc = _estimate_poi_uncertainty_from_profile(loss, minimizer, poi_param, fit_model)
     return {
         "dataset_id": sample_index + 1,
         "valid": bool(result.valid),
@@ -1002,7 +1238,7 @@ def _build_fit_summary(
         "fit_mode": resolved_fit_mode,
         "poi_name": poi_param.name,
         "poi_fit": float(poi_param.value()),
-        "poi_unc_hesse": _extract_hesse_error(result, poi_param),
+        "poi_unc_hesse": poi_unc,
         "fit_params": _extract_fit_parameter_values(result),
         "fit_param_hesse": _extract_fit_parameter_hesse_errors(result),
     }
